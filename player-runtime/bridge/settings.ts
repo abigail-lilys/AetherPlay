@@ -1,5 +1,7 @@
 // @ts-nocheck
 
+import { normalizeKeyChord } from "@/shared/keyInput";
+
 export function createSettingsStore(initialSettings) {
   let current = normalizeSettings(initialSettings);
 
@@ -53,17 +55,5 @@ function normalizeDictionaryDismissGuard(next) {
   return {
     enabled: guard.enabled !== false,
     triggers,
-  };
-}
-
-function normalizeKeyChord(chord) {
-  if (!chord || typeof chord !== "object") return null;
-  return {
-    code: typeof chord.code === "string" && chord.code ? chord.code : undefined,
-    altKey: Boolean(chord.altKey),
-    ctrlKey: Boolean(chord.ctrlKey),
-    metaKey: Boolean(chord.metaKey),
-    shiftKey: Boolean(chord.shiftKey),
-    label: typeof chord.label === "string" && chord.label ? chord.label : "Key",
   };
 }

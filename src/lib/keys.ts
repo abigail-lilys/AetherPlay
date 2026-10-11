@@ -1,27 +1,20 @@
-import type { PlayerSettings, ReservedKey } from "./types";
-
-export function matchesReservedKey(event: Pick<KeyboardEvent, "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">, key: ReservedKey): boolean {
-  return (
-    event.code === key.code &&
-    Boolean(event.altKey) === Boolean(key.altKey) &&
-    Boolean(event.ctrlKey) === Boolean(key.ctrlKey) &&
-    Boolean(event.metaKey) === Boolean(key.metaKey) &&
-    Boolean(event.shiftKey) === Boolean(key.shiftKey)
-  );
-}
+import { exactModifierMatch } from "@/shared/keyInput";
+import type { PlayerSettings, ReservedKey } from "@/src/lib/types";
 
 export function reservedKeyForEvent(
   event: Pick<KeyboardEvent, "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">,
   settings: PlayerSettings
 ): ReservedKey | undefined {
-  return settings.reservedKeys.find((key) => matchesReservedKey(event, key));
+  return settings.reservedKeys.find(
+    (key) => event.code === key.code && exactModifierMatch(event, key),
+  );
 }
 
 export function storageNamespace(gameId: string): string {
   return `mz-player:${gameId}:`;
 }
 
-export type RemovableStorage = Pick<Storage, "key" | "length" | "removeItem">;
+type RemovableStorage = Pick<Storage, "key" | "length" | "removeItem">;
 
 export function clearGameStorageNamespace(gameId: string, storage: RemovableStorage = window.localStorage): void {
   const prefix = storageNamespace(gameId);
@@ -43,11 +36,6 @@ function clearStorageKeysWithPrefix(prefix: string, storage: RemovableStorage): 
   for (const key of keys) {
     storage.removeItem(key);
   }
-}
-
-export function namespaceStorageKey(gameId: string, key: string): string {
-  const prefix = storageNamespace(gameId);
-  return key.startsWith(prefix) ? key : `${prefix}${key}`;
 }
 
 export function unnamespaceStorageKey(gameId: string, key: string): string {

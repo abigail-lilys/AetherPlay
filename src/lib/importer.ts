@@ -1,7 +1,7 @@
 import JSZip from "jszip";
-import { defaultPlayerSettings } from "./defaults";
-import { detectMime } from "./mime";
-import { findEntryPath, normalizeStoredPath, stripCommonWrapper, titleFromEntry } from "./paths";
+import { defaultPlayerSettings } from "@/src/lib/defaults";
+import { detectMime } from "@/src/lib/mime";
+import { findEntryPath, normalizeStoredPath, stripCommonWrapper, titleFromEntry } from "@/src/lib/paths";
 import {
   createOpfsWriter,
   putGame,
@@ -12,8 +12,8 @@ import {
   supportsOpfs,
   type BrowserFileSystemDirectoryHandle,
   type BrowserFileSystemFileHandle,
-} from "./storage";
-import type { GameRecord, ImportCandidate, ImportProgress } from "./types";
+} from "@/src/lib/storage";
+import type { GameRecord, ImportCandidate, ImportProgress } from "@/src/lib/types";
 
 type ProgressCallback = (progress: ImportProgress) => void;
 const PROGRESS_FILE_STEP = 25;
@@ -27,7 +27,7 @@ interface LocalFolderCandidate {
   directoryHandle: BrowserFileSystemDirectoryHandle;
 }
 
-export interface SessionFolderCandidate {
+interface SessionFolderCandidate {
   title: string;
   files: Array<{ path: string; file: File; size: number; mime: string }>;
   entryPath: string;
@@ -57,7 +57,7 @@ function zipNameBytes(bytes: string[] | Uint8Array | Buffer): Uint8Array {
   return Uint8Array.from(bytes.map((byte) => (typeof byte === "string" ? byte.charCodeAt(0) : byte)));
 }
 
-export function decodeZipFileName(bytes: string[] | Uint8Array | Buffer): string {
+function decodeZipFileName(bytes: string[] | Uint8Array | Buffer): string {
   const data = zipNameBytes(bytes);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(data);

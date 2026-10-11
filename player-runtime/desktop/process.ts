@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { scheduleMicrotask } from "@/shared/browser";
+import { setWritableProperty as setProcessValue } from "@/shared/object";
 
 export function createProcessRuntime(options = {}) {
   let currentWorkingDirectory = options.cwd || "/www";
@@ -8,11 +10,7 @@ export function createProcessRuntime(options = {}) {
     }
     const args = Array.prototype.slice.call(arguments, 1);
     const run = () => callback.apply(null, args);
-    if (typeof queueMicrotask === "function") {
-      queueMicrotask(run);
-    } else {
-      Promise.resolve().then(run);
-    }
+    scheduleMicrotask(run);
   }
 
   function processUptime() {
@@ -51,22 +49,6 @@ export function createProcessRuntime(options = {}) {
   function setProcessDefault(target, key, value) {
     if (target[key] !== undefined) return;
     setProcessValue(target, key, value);
-  }
-
-  function setProcessValue(target, key, value) {
-    try {
-      target[key] = value;
-    } catch {
-      try {
-        Object.defineProperty(target, key, {
-          configurable: true,
-          value,
-          writable: true,
-        });
-      } catch {
-        // A host-defined process object may have non-configurable properties.
-      }
-    }
   }
 
   function installProcessCompatibility() {

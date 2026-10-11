@@ -1,4 +1,4 @@
-import type { ImportProgress } from "../lib/types";
+import type { ImportProgress } from "@/src/lib/types";
 
 interface ImportProgressCardProps {
   progress: ImportProgress;

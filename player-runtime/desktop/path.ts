@@ -1,8 +1,42 @@
 // @ts-nocheck
+import { rpgMakerAssetReferenceAliases } from "@/player-runtime/engines/rpgmaker_mvmz/path";
 
 export function createPathRuntime(config) {
   const manifestFileByKey = new Map();
   const manifestDirs = new Set();
+
+  function assetReferenceVariants(reference) {
+    return [
+      reference,
+      "./" + reference,
+      "/" + reference.replace(/^\/+/, ""),
+    ];
+  }
+
+  function fileRouteReference(reference) {
+    return config.fileRoutePrefix + reference.replace(/^\/+/, "");
+  }
+
+  function encodedFileRouteUrl(path) {
+    return (
+      config.fileRoutePrefix +
+      String(path)
+        .replace(/\\+/g, "/")
+        .replace(/^\/+/, "")
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")
+    );
+  }
+
+  function manifestReferenceAliases(path) {
+    const rawPath = String(path).replace(/\\+/g, "/").replace(/^\/+/, "");
+    const aliases = new Set([rawPath]);
+    if (rawPath.toLowerCase().startsWith("www/")) {
+      aliases.add(rawPath.slice(4));
+    }
+    return { aliases, rawPath };
+  }
 
   function normalizePath(value) {
     const raw = String(value ?? "").replace(/\\+/g, "/");
@@ -228,16 +262,21 @@ export function createPathRuntime(config) {
   };
 
   return {
+    assetReferenceVariants,
     basename,
     dirname,
+    encodedFileRouteUrl,
     extname,
+    fileRouteReference,
     isAbsolute,
     joinPath,
     lookupManifestFile,
     manifestAliases,
     manifestDirExists,
     manifestKey,
+    manifestReferenceAliases,
     normalizePath,
+    rpgMakerAssetReferenceAliases,
     resolvePath,
     pathModule,
     trimTrailingSlash,

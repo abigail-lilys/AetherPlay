@@ -1,9 +1,22 @@
 /* Generated from player-runtime/bridge/*.ts by scripts/build-player-runtime.mjs. */
 (() => {
-  // player-runtime/bridge/keyEvents.ts
+  // shared/keyInput.ts
   function exactModifierMatch(event, trigger) {
     return Boolean(event.altKey) === Boolean(trigger.altKey) && Boolean(event.ctrlKey) === Boolean(trigger.ctrlKey) && Boolean(event.metaKey) === Boolean(trigger.metaKey) && Boolean(event.shiftKey) === Boolean(trigger.shiftKey);
   }
+  function normalizeKeyChord(chord) {
+    if (!chord || typeof chord !== "object") return null;
+    return {
+      code: typeof chord.code === "string" && chord.code ? chord.code : void 0,
+      altKey: Boolean(chord.altKey),
+      ctrlKey: Boolean(chord.ctrlKey),
+      metaKey: Boolean(chord.metaKey),
+      shiftKey: Boolean(chord.shiftKey),
+      label: typeof chord.label === "string" && chord.label ? chord.label : "Key"
+    };
+  }
+
+  // player-runtime/bridge/keyEvents.ts
   function keyEventMatchesChord(event, chord) {
     return event.code === chord.code && exactModifierMatch(event, chord);
   }
@@ -152,17 +165,6 @@
       triggers
     };
   }
-  function normalizeKeyChord(chord) {
-    if (!chord || typeof chord !== "object") return null;
-    return {
-      code: typeof chord.code === "string" && chord.code ? chord.code : void 0,
-      altKey: Boolean(chord.altKey),
-      ctrlKey: Boolean(chord.ctrlKey),
-      metaKey: Boolean(chord.metaKey),
-      shiftKey: Boolean(chord.shiftKey),
-      label: typeof chord.label === "string" && chord.label ? chord.label : "Key"
-    };
-  }
 
   // player-runtime/bridge/storageNamespace.ts
   function patchLocalStorage(namespace) {
@@ -219,7 +221,216 @@
   var FOCUS_RETURN_EVENT_TYPES = ["pointerup", "mouseup", "click", "touchend"];
   var TEXT_LOG_DELAY_MS = 140;
 
-  // player-runtime/bridge/cocos.ts
+  // shared/text.ts
+  function textLogDedupeKey(text) {
+    return text.replace(/\s+/gu, " ").trim();
+  }
+
+  // player-runtime/bridge/overlay/geometry.ts
+  function transformPoint(matrix, x, y) {
+    return {
+      x: matrix.a * x + matrix.c * y + matrix.tx,
+      y: matrix.b * x + matrix.d * y + matrix.ty
+    };
+  }
+  function spriteFrame(sprite) {
+    const frame = sprite && (sprite._frame || sprite._realFrame);
+    const width = Number(frame && frame.width) || Number(sprite.width) || 0;
+    const height = Number(frame && frame.height) || Number(sprite.height) || 0;
+    return {
+      x: Number(frame && frame.x) || 0,
+      y: Number(frame && frame.y) || 0,
+      width: Math.max(0, width),
+      height: Math.max(0, height)
+    };
+  }
+  function roundCssPixel(value) {
+    return Math.round(value * 2) / 2;
+  }
+  function cssTransformFromTopLeftPoints(points, localWidth, localHeight) {
+    if (!Array.isArray(points) || points.length !== 4) return null;
+    const width = Number(localWidth);
+    const height = Number(localHeight);
+    if (!(width > 0) || !(height > 0)) return null;
+    const cssPoints = points.map((point) => ({
+      x: Number(point?.x),
+      y: Number(point?.y)
+    }));
+    if (cssPoints.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+      return null;
+    }
+    const [topLeft, topRight, , bottomLeft] = cssPoints;
+    return {
+      left: topLeft.x,
+      top: topLeft.y,
+      width,
+      height,
+      matrix: {
+        a: (topRight.x - topLeft.x) / width,
+        b: (topRight.y - topLeft.y) / width,
+        c: (bottomLeft.x - topLeft.x) / height,
+        d: (bottomLeft.y - topLeft.y) / height
+      },
+      bounds: {
+        left: Math.min(...cssPoints.map((point) => point.x)),
+        top: Math.min(...cssPoints.map((point) => point.y)),
+        right: Math.max(...cssPoints.map((point) => point.x)),
+        bottom: Math.max(...cssPoints.map((point) => point.y))
+      }
+    };
+  }
+  function displayObjectIsVisible(object) {
+    let current = object;
+    let guard = 0;
+    while (current && guard++ < 30) {
+      if (current.visible === false || current.renderable === false || current.alpha === 0) {
+        return false;
+      }
+      current = current.parent;
+    }
+    return true;
+  }
+  function rectsIntersect(a, b) {
+    return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+  }
+  function boundsIntersectRect(bounds, rect) {
+    return bounds.left < rect.right && bounds.top < rect.bottom && bounds.right > rect.left && bounds.bottom > rect.top;
+  }
+  function intersectRects(a, b) {
+    const x1 = Math.max(a.x, b.x);
+    const y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.width, b.x + b.width);
+    const y2 = Math.min(a.y + a.height, b.y + b.height);
+    if (x2 <= x1 || y2 <= y1) return null;
+    return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+  }
+  function ownerWorldPosition(owner) {
+    let x = 0;
+    let y = 0;
+    let current = owner;
+    let guard = 0;
+    while (current && guard++ < 20) {
+      x += Number(current.x) || 0;
+      y += Number(current.y) || 0;
+      current = current.parent;
+    }
+    return { x, y };
+  }
+  function findBitmapSprite(owner, bitmap) {
+    if (!owner || !bitmap) return null;
+    const queue = Array.isArray(owner.children) ? [...owner.children] : [];
+    const seen = /* @__PURE__ */ new Set();
+    while (queue.length && seen.size < 3e3) {
+      const current = queue.shift();
+      if (!current || seen.has(current)) continue;
+      seen.add(current);
+      if (current.bitmap === bitmap || current._bitmap === bitmap) return current;
+      if (Array.isArray(current.children)) queue.push(...current.children);
+    }
+    return null;
+  }
+  function contentSpriteFor(owner, bitmap) {
+    const candidates = [
+      owner && owner._windowContentsSprite,
+      owner && owner._contentsSprite
+    ];
+    const matching = candidates.find(
+      (sprite) => sprite && sprite.bitmap === bitmap
+    );
+    return matching || findBitmapSprite(owner, bitmap) || candidates.find(Boolean) || null;
+  }
+  function contentGeometry(entry) {
+    const owner = entry.owner;
+    const sprite = contentSpriteFor(owner, entry.bitmap);
+    if (sprite) {
+      const position = ownerWorldPosition(sprite);
+      const frame = spriteFrame(sprite);
+      const anchorX = Number(sprite.anchor?.x) || 0;
+      const anchorY = Number(sprite.anchor?.y) || 0;
+      return {
+        x: position.x - anchorX * frame.width,
+        y: position.y - anchorY * frame.height,
+        originX: frame.x,
+        originY: frame.y,
+        visibleWidth: frame.width,
+        visibleHeight: frame.height
+      };
+    }
+    const ownerPos = ownerWorldPosition(owner);
+    const padding = Number(owner.padding) || 0;
+    const originX = owner.origin ? Number(owner.origin.x) || 0 : 0;
+    const originY = owner.origin ? Number(owner.origin.y) || 0 : 0;
+    return {
+      x: ownerPos.x + padding,
+      y: ownerPos.y + padding,
+      originX,
+      originY,
+      visibleWidth: Math.max(
+        0,
+        (Number(owner.width) || Number(owner._width) || 0) - padding * 2
+      ),
+      visibleHeight: Math.max(
+        0,
+        (Number(owner.height) || Number(owner._height) || 0) - padding * 2
+      )
+    };
+  }
+  function displayObjectPageBounds(object, canvasRect, canvasWidth, canvasHeight) {
+    if (!object || !displayObjectIsVisible(object)) return null;
+    const frame = spriteFrame(object);
+    if (frame.width <= 0 || frame.height <= 0) return null;
+    const anchorX = Number(object.anchor?.x) || 0;
+    const anchorY = Number(object.anchor?.y) || 0;
+    const matrix = object.worldTransform || object.transform?.worldTransform;
+    let points;
+    if (matrix && [matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty].every(
+      Number.isFinite
+    )) {
+      const left2 = -anchorX * frame.width;
+      const top2 = -anchorY * frame.height;
+      points = [
+        transformPoint(matrix, left2, top2),
+        transformPoint(matrix, left2 + frame.width, top2),
+        transformPoint(matrix, left2 + frame.width, top2 + frame.height),
+        transformPoint(matrix, left2, top2 + frame.height)
+      ];
+    } else {
+      const position = ownerWorldPosition(object);
+      const left2 = position.x - anchorX * frame.width;
+      const top2 = position.y - anchorY * frame.height;
+      points = [
+        { x: left2, y: top2 },
+        { x: left2 + frame.width, y: top2 },
+        { x: left2 + frame.width, y: top2 + frame.height },
+        { x: left2, y: top2 + frame.height }
+      ];
+    }
+    const cssScaleX = canvasRect.width / (Number(canvasWidth) || canvasRect.width || 1);
+    const cssScaleY = canvasRect.height / (Number(canvasHeight) || canvasRect.height || 1);
+    const cssPoints = points.map((point) => ({
+      x: canvasRect.left + point.x * cssScaleX,
+      y: canvasRect.top + point.y * cssScaleY
+    }));
+    const left = Math.min(...cssPoints.map((point) => point.x));
+    const top = Math.min(...cssPoints.map((point) => point.y));
+    const right = Math.max(...cssPoints.map((point) => point.x));
+    const bottom = Math.max(...cssPoints.map((point) => point.y));
+    return {
+      left: roundCssPixel(left),
+      top: roundCssPixel(top),
+      width: roundCssPixel(Math.max(1, right - left)),
+      height: roundCssPixel(Math.max(1, bottom - top))
+    };
+  }
+  function hashText(text) {
+    let hash = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      hash = (hash << 5) - hash + text.charCodeAt(index) | 0;
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  // player-runtime/engines/cocos/text.ts
   var COCOS_NAMED_ENTITIES = {
     amp: "&",
     apos: "'",
@@ -387,31 +598,212 @@
       x: canvasRect.left + Number(point?.x) * scaleX,
       y: canvasRect.top + (pixelHeight - Number(point?.y)) * scaleY
     }));
-    if (cssPoints.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
-      return null;
-    }
-    const [bottomLeft, , topRight, topLeft] = cssPoints;
-    return {
-      left: topLeft.x,
-      top: topLeft.y,
+    return cssTransformFromTopLeftPoints(
+      [cssPoints[3], cssPoints[2], cssPoints[1], cssPoints[0]],
       width,
-      height,
-      matrix: {
-        a: (topRight.x - topLeft.x) / width,
-        b: (topRight.y - topLeft.y) / width,
-        c: (bottomLeft.x - topLeft.x) / height,
-        d: (bottomLeft.y - topLeft.y) / height
-      },
-      bounds: {
-        left: Math.min(...cssPoints.map((point) => point.x)),
-        top: Math.min(...cssPoints.map((point) => point.y)),
-        right: Math.max(...cssPoints.map((point) => point.x)),
-        bottom: Math.max(...cssPoints.map((point) => point.y))
-      }
-    };
+      height
+    );
   }
 
-  // player-runtime/bridge/textOverlayStyle.ts
+  // player-runtime/engines/cocos/overlay.ts
+  function createCocosOverlayAdapter({
+    domSourceId,
+    ensureOverlayDom,
+    overlayIsActive,
+    overlayState,
+    removeEntry,
+    scheduleFlush,
+    upsertEntry
+  }) {
+    function install() {
+      if (overlayState.cocosHooksInstalled) return;
+      const tryInstall = () => {
+        if (overlayState.cocosHooksInstalled) return true;
+        ensureOverlayDom();
+        const engine = resolveCocosEngine(window.System);
+        if (!engine) return false;
+        overlayState.cocosEngine = engine;
+        overlayState.cocosHooksInstalled = true;
+        if (document.fonts) {
+          document.fonts.ready.then(scheduleFlush);
+          document.fonts.addEventListener?.("loadingdone", scheduleFlush);
+        }
+        const scan = (now) => {
+          overlayState.cocosScanFrame = 0;
+          if (now - overlayState.cocosLastScanAt >= 50) {
+            overlayState.cocosLastScanAt = now;
+            scanText();
+          }
+          overlayState.cocosScanFrame = requestAnimationFrame(scan);
+        };
+        overlayState.cocosScanFrame = requestAnimationFrame(scan);
+        return true;
+      };
+      if (tryInstall()) return;
+      setTimeout(install, 250);
+    }
+    function scanText() {
+      if (!overlayIsActive()) return;
+      const engine = overlayState.cocosEngine;
+      const scene = engine?.director?.getScene?.();
+      const canvas = cocosCanvas(engine);
+      if (!scene || !(canvas instanceof HTMLCanvasElement)) return;
+      const seen = /* @__PURE__ */ new Set();
+      const visit = (node, insideRichText = false) => {
+        if (!node || node.activeInHierarchy === false || node.active === false) return;
+        const components = Array.isArray(node._components) ? node._components : [];
+        const richText = components.find(
+          (component) => cocosComponentIs(component, engine.RichText)
+        );
+        if (richText && cocosSourceIsVisible(richText)) {
+          captureSource(engine, richText, canvas, true, seen);
+        }
+        if (!insideRichText && !richText) {
+          for (const component of components) {
+            if (cocosComponentIs(component, engine.Label) && cocosSourceIsVisible(component)) {
+              captureSource(engine, component, canvas, false, seen);
+            }
+          }
+        }
+        for (const child of node.children || []) {
+          visit(child, insideRichText || Boolean(richText));
+        }
+      };
+      visit(scene);
+      for (const [key, entry] of overlayState.entries) {
+        if (entry.cocosSource && !seen.has(key)) removeEntry(key, entry);
+      }
+      scheduleFlush();
+    }
+    function captureSource(engine, source, canvas, richText, seen) {
+      const rawText = source.string ?? source._string;
+      const text = richText ? plainCocosText(rawText) : String(rawText ?? "").replace(/\u00a0/gu, " ").trim();
+      if (!text) return;
+      const displayText = cocosRenderedText(source, text);
+      const rect = cocosPageRect(engine, source, canvas, displayText);
+      if (!rect) return;
+      const key = `cocos:${domSourceId(source)}`;
+      seen.add(key);
+      upsertEntry(key, {
+        cocosSource: source,
+        cocosRect: rect,
+        text,
+        displayText,
+        width: rect.width,
+        height: rect.height,
+        fontSize: rect.fontSize,
+        fontFace: cocosCssFontFamily(source),
+        fontStyle: source.isItalic || source._isItalic ? "italic" : "normal",
+        fontWeight: source.isBold || source._isBold ? "700" : "400",
+        textDecoration: source.isUnderline || source._isUnderline ? "underline" : "none",
+        lineHeight: rect.lineHeight,
+        paddingTop: rect.paddingTop,
+        textAlign: cocosTextAlign(source.horizontalAlign ?? source._horizontalAlign),
+        updatedAt: performance.now()
+      });
+    }
+    return { install };
+  }
+  function cocosSourceIsVisible(source) {
+    const node = source?.node;
+    if (!node || node.isValid === false || node.activeInHierarchy === false) return false;
+    if (source.enabled === false || source.enabledInHierarchy === false) return false;
+    const colorAlpha = Number(source.color?.a ?? source._color?.a ?? 255);
+    if (colorAlpha <= 0) return false;
+    let current = node;
+    let guard = 0;
+    while (current && guard++ < 100) {
+      if (current.active === false || current.activeInHierarchy === false) return false;
+      current = current.parent;
+    }
+    return true;
+  }
+  function cocosComponentIs(component, Component) {
+    if (!component || typeof Component !== "function") return false;
+    try {
+      return component instanceof Component;
+    } catch {
+      return false;
+    }
+  }
+  function cocosCanvas(engine) {
+    return engine?.game?.canvas || document.querySelector("#GameCanvas, canvas");
+  }
+  function cocosPageRect(engine, source, canvas, text) {
+    const node = source.node;
+    const transform = node?.getComponent?.(engine.UITransform);
+    const camera = engine?.director?.root?.batcher2D?.getFirstRenderCamera?.(node);
+    const Vec3 = engine?.Vec3;
+    if (!transform || !camera || typeof Vec3 !== "function") return null;
+    const contentSize = transform.contentSize || transform._contentSize;
+    const anchor = transform.anchorPoint || transform._anchorPoint;
+    const width = Number(contentSize?.width);
+    const height = Number(contentSize?.height);
+    const anchorX = Number(anchor?.x);
+    const anchorY = Number(anchor?.y);
+    if (!(width > 0) || !(height > 0)) return null;
+    const normalizedAnchorX = Number.isFinite(anchorX) ? anchorX : 0.5;
+    const normalizedAnchorY = Number.isFinite(anchorY) ? anchorY : 0.5;
+    const localPoints = [
+      [-width * normalizedAnchorX, -height * normalizedAnchorY],
+      [width * (1 - normalizedAnchorX), -height * normalizedAnchorY],
+      [width * (1 - normalizedAnchorX), height * (1 - normalizedAnchorY)],
+      [-width * normalizedAnchorX, height * (1 - normalizedAnchorY)]
+    ];
+    const screenPoints = [];
+    try {
+      for (const [x, y] of localPoints) {
+        const world = transform.convertToWorldSpaceAR(new Vec3(x, y, 0), new Vec3());
+        const screen = cocosWorldToScreen(camera, Vec3, world);
+        if (!screen) return null;
+        screenPoints.push({ x: Number(screen.x), y: Number(screen.y) });
+      }
+    } catch {
+      return null;
+    }
+    const canvasRect = canvas.getBoundingClientRect();
+    const rect = cocosCssRectFromScreenPoints(
+      screenPoints,
+      canvasRect,
+      canvas.width,
+      canvas.height
+    );
+    const geometry = cocosCssTransformFromScreenPoints(
+      screenPoints,
+      canvasRect,
+      canvas.width,
+      canvas.height,
+      width,
+      height
+    );
+    if (!rect || !geometry || !boundsIntersectRect(geometry.bounds, canvasRect)) {
+      return null;
+    }
+    const { fontSize, lineHeight } = cocosFontMetrics(
+      source,
+      engine?.view?.getScaleX?.() || 1
+    );
+    const lineCount = Math.max(1, String(text).split("\n").length);
+    const textHeight = Math.min(height, lineHeight * lineCount);
+    const verticalFactor = cocosVerticalAlignFactor(
+      source.verticalAlign ?? source._verticalAlign
+    );
+    return {
+      left: roundCocosCssNumber(geometry.left),
+      top: roundCocosCssNumber(geometry.top),
+      width: roundCocosCssNumber(geometry.width),
+      height: roundCocosCssNumber(geometry.height),
+      fontSize: roundCocosCssNumber(fontSize),
+      lineHeight: roundCocosCssNumber(lineHeight),
+      paddingTop: roundCocosCssNumber(Math.max(0, height - textHeight) * verticalFactor),
+      transform: `matrix(${roundCocosCssNumber(geometry.matrix.a)}, ${roundCocosCssNumber(geometry.matrix.b)}, ${roundCocosCssNumber(geometry.matrix.c)}, ${roundCocosCssNumber(geometry.matrix.d)}, 0, 0)`
+    };
+  }
+  function roundCocosCssNumber(value) {
+    return Math.round(value * 1e3) / 1e3;
+  }
+
+  // player-runtime/bridge/overlay/textStyle.ts
   var EMOJI_FONT_FALLBACK = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
   var EMOJI_FONT_NAMES = /* @__PURE__ */ new Set([
     "apple color emoji",
@@ -448,6 +840,17 @@
     );
     if (genericIndex < 0) withoutEmoji.push("sans-serif");
     return withoutEmoji.join(", ") || EMOJI_FONT_FALLBACK;
+  }
+  function canvasFontSize(context, bitmap, owner) {
+    const match = String(context?.font || "").match(/(\d+(?:\.\d+)?)px/);
+    const parsed = match ? Number(match[1]) : 0;
+    return parsed || bitmap?.fontSize || owner?.standardFontSize?.() || 24;
+  }
+  function canvasFontFace(context) {
+    const font = String(context?.font || "").trim();
+    if (!font) return "";
+    const match = font.match(/\d+(?:\.\d+)?px(?:\/[^\s]+)?\s+(.+)$/);
+    return match ? match[1] : "";
   }
   function canvasFontTraits(context, bitmap) {
     const font = String(context?.font || "");
@@ -535,412 +938,194 @@
       x: canvasRect.left + Number(point?.x) * scaleX,
       y: canvasRect.top + Number(point?.y) * scaleY
     }));
-    if (cssPoints.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
-      return null;
-    }
-    const [topLeft, topRight, , bottomLeft] = cssPoints;
-    return {
-      left: topLeft.x,
-      top: topLeft.y,
-      width,
-      height,
-      matrix: {
-        a: (topRight.x - topLeft.x) / width,
-        b: (topRight.y - topLeft.y) / width,
-        c: (bottomLeft.x - topLeft.x) / height,
-        d: (bottomLeft.y - topLeft.y) / height
-      },
-      bounds: {
-        left: Math.min(...cssPoints.map((point) => point.x)),
-        top: Math.min(...cssPoints.map((point) => point.y)),
-        right: Math.max(...cssPoints.map((point) => point.x)),
-        bottom: Math.max(...cssPoints.map((point) => point.y))
-      }
-    };
+    return cssTransformFromTopLeftPoints(cssPoints, width, height);
   }
 
-  // player-runtime/bridge/overlay.ts
-  var OWNER_ID = "__mzPlayerTextOverlayOwnerId";
-  function createTextOverlayBridge({ config, postParentMessage, settings }) {
-    const overlayState = {
-      nextOwnerId: 1,
-      bitmapOwners: /* @__PURE__ */ new WeakMap(),
-      contextOwners: /* @__PURE__ */ new WeakMap(),
-      entries: /* @__PURE__ */ new Map(),
-      lineGroups: /* @__PURE__ */ new Map(),
-      textLogTimers: /* @__PURE__ */ new Map(),
-      textLogValues: /* @__PURE__ */ new Map(),
-      domSourceIds: /* @__PURE__ */ new WeakMap(),
-      consumedGuardKeyCodes: /* @__PURE__ */ new Set(),
-      hoveredTextEntry: null,
-      raf: 0,
-      lastScene: null,
-      installedHooks: false,
-      rpgMakerRehookScheduled: false,
-      inputGuardInstalled: false,
-      sceneHooksInstalled: false,
-      sceneBaseHooksInstalled: false,
-      focusReturnInstalled: false,
-      tyranoHooksInstalled: false,
-      tyranoObserver: null,
-      tyranoScanFrame: 0,
-      construct2HooksInstalled: false,
-      construct2ScanFrame: 0,
-      cocosEngine: null,
-      cocosHooksInstalled: false,
-      cocosScanFrame: 0,
-      cocosLastScanAt: 0,
-      nextDomSourceId: 1,
-      canvasTextCaptureDepth: 0,
-      activeRpgMakerDrawCapture: null,
-      baselineProbeCache: /* @__PURE__ */ new Map(),
-      measureContext: null,
-      root: null,
-      style: null
+  // player-runtime/engines/construct2/overlay.ts
+  function createConstruct2OverlayAdapter({
+    domSourceId,
+    overlayIsActive,
+    overlayState,
+    removeEntry,
+    upsertEntry
+  }) {
+    function install() {
+      if (overlayState.construct2HooksInstalled) return;
+      overlayState.construct2HooksInstalled = true;
+      const scan = () => {
+        overlayState.construct2ScanFrame = 0;
+        scanText();
+        overlayState.construct2ScanFrame = requestAnimationFrame(scan);
+      };
+      overlayState.construct2ScanFrame = requestAnimationFrame(scan);
+    }
+    function scanText() {
+      if (!overlayIsActive()) return;
+      const runtime = construct2Runtime();
+      if (!runtime || !Array.isArray(runtime.types_by_index)) return;
+      const seen = /* @__PURE__ */ new Set();
+      for (const type of runtime.types_by_index) {
+        if (!isConstruct2TextType(type) || !Array.isArray(type.instances)) continue;
+        for (const source of type.instances) {
+          if (!construct2SourceIsVisible(source)) continue;
+          const text = construct2SourceText(source);
+          if (!text) continue;
+          const rect = construct2PageRect(runtime, source);
+          if (!rect) continue;
+          const key = `construct2:${domSourceId(source)}`;
+          seen.add(key);
+          upsertEntry(key, {
+            constructSource: source,
+            constructRect: rect,
+            text,
+            width: rect.width,
+            height: rect.height,
+            fontSize: rect.fontSize,
+            fontFace: fontFamilyWithEmojiFallback(source.facename || "sans-serif"),
+            fontStyle: /italic/iu.test(String(source.fontstyle || "")) ? "italic" : "normal",
+            fontWeight: /bold/iu.test(String(source.fontstyle || "")) ? "700" : "400",
+            lineHeight: rect.lineHeight,
+            paddingTop: rect.paddingTop,
+            textAlign: construct2TextAlign(source.halign),
+            updatedAt: performance.now()
+          });
+        }
+      }
+      for (const [key, entry] of overlayState.entries) {
+        if (entry.constructSource && !seen.has(key)) removeEntry(key, entry);
+      }
+    }
+    return { install };
+  }
+  function construct2SourceIsVisible(source) {
+    if (!source || source.visible === false || Number(source.opacity) === 0) return false;
+    const layer = source.layer;
+    if (!layer || layer.visible === false || Number(layer.opacity) === 0) return false;
+    return true;
+  }
+  function construct2TextSegments(text) {
+    const value = String(text ?? "");
+    try {
+      const segmenter = new Intl.Segmenter(void 0, { granularity: "grapheme" });
+      return [...segmenter.segment(value)].map((segment) => segment.segment);
+    } catch {
+      return Array.from(value);
+    }
+  }
+  function construct2Runtime() {
+    try {
+      return window.cr_getC2Runtime?.() || window.c2runtime || null;
+    } catch {
+      return window.c2runtime || null;
+    }
+  }
+  function isConstruct2TextType(type) {
+    const plugins = window.cr?.plugins_;
+    const plugin = type?.plugin;
+    if (!plugins || !plugin) return false;
+    return [plugins.Text, plugins.Spritefont2].some(
+      (Plugin) => typeof Plugin === "function" && plugin instanceof Plugin
+    );
+  }
+  function construct2SourceText(source) {
+    try {
+      source.rebuildText?.();
+    } catch {
+    }
+    if (Array.isArray(source.lines) && source.lines.length > 0) {
+      const lines = source.lines.map((line) => String(line?.text ?? ""));
+      if (lines.some(Boolean)) return lines.join("\n");
+    }
+    return String(source.text ?? "");
+  }
+  function construct2PageRect(runtime, source) {
+    const canvas = runtime.canvas || document.querySelector("#c2canvas");
+    const layer = source.layer;
+    if (!(canvas instanceof HTMLCanvasElement) || !layer) return null;
+    try {
+      source.update_bbox?.();
+    } catch {
+      return null;
+    }
+    const quad = source.bquad;
+    if (!quad) return null;
+    const points = [
+      [quad.tlx, quad.tly],
+      [quad.trx, quad.try_],
+      [quad.brx, quad.bry],
+      [quad.blx, quad.bly]
+    ].map(([x, y]) => ({
+      x: Number(layer.layerToCanvas?.(x, y, true, true)),
+      y: Number(layer.layerToCanvas?.(x, y, false, true))
+    }));
+    if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+      return null;
+    }
+    const canvasRect = canvas.getBoundingClientRect();
+    if (canvasRect.width <= 0 || canvasRect.height <= 0) return null;
+    const sourceWidth = Math.abs(Number(source.width));
+    const sourceHeight = Math.abs(Number(source.height));
+    const geometry = cssTransformFromTopLeftCanvasQuad(
+      points,
+      canvasRect,
+      runtime.draw_width || canvas.width,
+      runtime.draw_height || canvas.height,
+      sourceWidth,
+      sourceHeight
+    );
+    if (!geometry || !boundsIntersectRect(geometry.bounds, canvasRect)) {
+      return null;
+    }
+    const sourceFontSize = Number(source.characterHeight) * (Number(source.characterScale) || 1) || Number(source.pxHeight) || 24;
+    const lineHeight = sourceFontSize + (Number(source.lineHeight) || Number(source.line_height_offset) || 0);
+    const textHeight = Math.max(
+      lineHeight,
+      Number(source.textHeight) || lineHeight * Math.max(1, source.lines?.length || 1)
+    );
+    return {
+      left: roundCssNumber(geometry.left),
+      top: roundCssNumber(geometry.top),
+      width: roundCssNumber(geometry.width),
+      height: roundCssNumber(geometry.height),
+      fontSize: roundCssNumber(sourceFontSize),
+      lineHeight: roundCssNumber(Math.max(1, lineHeight)),
+      paddingTop: roundCssNumber(
+        (Number(source.valign) || 0) * Math.max(0, sourceHeight - textHeight)
+      ),
+      transform: `matrix(${roundCssNumber(geometry.matrix.a)}, ${roundCssNumber(geometry.matrix.b)}, ${roundCssNumber(geometry.matrix.c)}, ${roundCssNumber(geometry.matrix.d)}, 0, 0)`
     };
-    function ensureOverlayDom() {
-      if (!overlayState.style) {
-        overlayState.style = document.createElement("style");
-        overlayState.style.textContent = `
-        canvas:focus,
-        canvas:focus-visible,
-        video:focus,
-        video:focus-visible {
-          outline: none !important;
-        }
+  }
+  function construct2TextAlign(halign) {
+    const value = Number(halign);
+    if (value >= 0.75) return "right";
+    if (value >= 0.25) return "center";
+    return "left";
+  }
+  function roundCssNumber(value) {
+    return Math.round(value * 1e3) / 1e3;
+  }
 
-        #mz-player-text-overlay {
-          position: fixed;
-          inset: 0;
-          z-index: 2147483647;
-          pointer-events: none;
-          display: none;
-          font-synthesis: none;
-          text-rendering: optimizeLegibility;
-        }
-
-        #mz-player-text-overlay.mz-player-text-overlay-active {
-          display: block;
-        }
-
-        .mz-player-text-overlay-entry {
-          position: fixed;
-          box-sizing: border-box;
-          display: block;
-          white-space: pre;
-          overflow: visible;
-          pointer-events: none;
-          user-select: text;
-          contain: layout style paint;
-          color: transparent;
-          text-shadow: none;
-          background: transparent;
-          border-radius: 2px;
-          padding: 0;
-          margin: 0;
-          border: 0;
-          line-height: 1;
-          letter-spacing: 0;
-          word-spacing: 0;
-          font-kerning: none;
-          font-variant-ligatures: none;
-          opacity: 1;
-        }
-
-        .mz-player-text-overlay-entry-dom {
-          white-space: pre-wrap;
-          overflow-wrap: normal;
-        }
-
-        .mz-player-text-overlay-entry-construct2 {
-          white-space: pre;
-          overflow: visible;
-        }
-
-        .mz-player-text-overlay-entry-construct2-line {
-          position: absolute;
-          display: block;
-          white-space: pre;
-          transform-origin: 0 0;
-          user-select: text;
-        }
-
-        .mz-player-text-overlay-entry-construct2-character {
-          position: absolute;
-          display: block;
-          top: 0;
-          white-space: pre;
-          transform-origin: 0 0;
-          font: inherit;
-          color: inherit;
-          text-shadow: inherit;
-        }
-
-        .mz-player-text-overlay-entry-cocos {
-          white-space: pre-wrap;
-          overflow: hidden;
-        }
-
-        .mz-player-text-overlay-entry-rpg-text {
-          position: absolute;
-          display: block;
-          box-sizing: border-box;
-          white-space: pre;
-          overflow: visible;
-          padding: 0;
-          margin: 0;
-          border: 0;
-          color: inherit;
-          text-shadow: inherit;
-          user-select: text;
-        }
-
-        .mz-player-text-overlay-entry-rpg {
-          contain: layout style;
-        }
-
-        .mz-player-text-overlay-entry-rpg-segment {
-          position: absolute;
-          display: block;
-          top: 0;
-          white-space: pre;
-          font: inherit;
-          color: inherit;
-          text-shadow: inherit;
-        }
-
-        #mz-player-text-overlay.mz-player-text-overlay-readable .mz-player-text-overlay-entry {
-          color: rgba(255, 255, 255, 0.96);
-          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 3px rgba(0, 0, 0, 0.8);
-          background: transparent;
-        }
-
-        #mz-player-text-overlay.mz-player-text-overlay-reader .mz-player-text-overlay-entry {
-          pointer-events: auto;
-          cursor: text;
-        }
-      `;
-        document.documentElement.appendChild(overlayState.style);
-      }
-      if (!overlayState.root) {
-        overlayState.root = document.createElement("div");
-        overlayState.root.id = "mz-player-text-overlay";
-        document.documentElement.appendChild(overlayState.root);
-        installOverlayFocusReturn();
-      }
-    }
-    function installOverlayFocusReturn() {
-      if (!overlayState.root || overlayState.focusReturnInstalled) return;
-      overlayState.focusReturnInstalled = true;
-      const trackOverlayText = (event) => {
-        const entry = overlayTextEntry(event.target);
-        if (!entry) return;
-        overlayState.hoveredTextEntry = entry;
-      };
-      const clearOverlayText = (event) => {
-        if (!overlayState.hoveredTextEntry) return;
-        if (event.relatedTarget instanceof Node && overlayState.root.contains(event.relatedTarget)) return;
-        overlayState.hoveredTextEntry = null;
-      };
-      const consumeOverlayTextPointerEvent = (event) => {
-        const entry = overlayTextEntry(event.target);
-        if (!entry) return;
-        overlayState.hoveredTextEntry = entry;
-        event.stopPropagation();
-      };
-      const restoreGameFocusAfterSurfacePointer = (event) => {
-        if (overlayTextEntry(event.target) || !eventTargetsGameSurface(event.target)) return;
-        if (!FOCUS_RETURN_EVENT_TYPES.includes(event.type)) return;
-        window.setTimeout(() => {
-          focusGameTarget();
-          returnFocus();
-        }, 0);
-      };
-      const returnFocus = () => {
-        if (!settings.readerMode) return;
-        window.setTimeout(() => {
-          postParentMessage({ type: "return-focus" });
-        }, 0);
-      };
-      for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "touchstart", "touchend"]) {
-        window.addEventListener(type, consumeOverlayTextPointerEvent, true);
-        window.addEventListener(type, restoreGameFocusAfterSurfacePointer, true);
-      }
-      overlayState.root.addEventListener("pointerover", trackOverlayText, true);
-      overlayState.root.addEventListener("pointermove", trackOverlayText, true);
-      overlayState.root.addEventListener("pointerdown", trackOverlayText, true);
-      overlayState.root.addEventListener("pointerup", returnFocus, true);
-      overlayState.root.addEventListener("mouseup", returnFocus, true);
-      overlayState.root.addEventListener("touchend", returnFocus, true);
-      overlayState.root.addEventListener("click", returnFocus, true);
-      overlayState.root.addEventListener("pointerout", clearOverlayText, true);
-      for (const type of ["keydown", "keypress", "keyup"]) {
-        window.addEventListener(type, handleDictionaryGuardKeyEvent, true);
-      }
-      window.addEventListener("blur", clearGuardState, true);
-      document.addEventListener(
-        "visibilitychange",
-        () => {
-          if (document.visibilityState !== "visible") clearGuardState();
-        },
-        true
-      );
-    }
-    function overlayTextEntry(target) {
-      return target instanceof Element ? target.closest(".mz-player-text-overlay-entry") : null;
-    }
-    function eventTargetsGameSurface(target) {
-      if (target === document || target === document.body || target === document.documentElement) return true;
-      return target instanceof Element && Boolean(target.closest("canvas, video"));
-    }
-    function dictionaryGuardActive() {
-      return Boolean(settings.overlayEnabled && settings.dictionaryDismissGuard?.enabled && settings.dictionaryDismissGuard.triggers?.length);
-    }
-    function handleDictionaryGuardKeyEvent(event) {
-      if (event.code === "Escape") {
-        clearGuardState();
-        return;
-      }
-      maybeConsumeDictionaryDismissKeyEvent(event);
-    }
-    function maybeConsumeDictionaryDismissKeyEvent(event) {
-      if (event.type === "keyup" && overlayState.consumedGuardKeyCodes.has(event.code)) {
-        overlayState.consumedGuardKeyCodes.delete(event.code);
-        releaseRpgMakerInputState(event);
-        consumeEvent(event);
-        return true;
-      }
-      if (event.type === "keyup" && guardReleaseMatchesKeyEvent(event)) {
-        overlayState.consumedGuardKeyCodes.delete(event.code);
-        releaseRpgMakerInputState(event);
-        consumeEvent(event);
-        return true;
-      }
-      if (!dictionaryGuardActive()) return false;
-      const match = settings.dictionaryDismissGuard.triggers.find((trigger) => guardTriggerMatchesKeyEvent(event, trigger));
-      if (!match) return false;
-      releaseRpgMakerInputState(event);
-      consumeEvent(event);
-      if (event.type === "keydown") {
-        overlayState.consumedGuardKeyCodes.add(event.code);
-      }
-      if (event.type === "keyup") {
-        overlayState.consumedGuardKeyCodes.delete(event.code);
-      }
-      return true;
-    }
-    function guardReleaseMatchesKeyEvent(event) {
-      if (!settings.dictionaryDismissGuard?.enabled || !settings.dictionaryDismissGuard.triggers?.length) return false;
-      return settings.dictionaryDismissGuard.triggers.some((trigger) => {
-        if (trigger.code) return event.code === trigger.code;
-        return modifierOnlyTriggerMatchesEventCode(event.code, trigger);
-      });
-    }
-    function guardTriggerMatchesKeyEvent(event, trigger) {
-      if (!exactModifierMatch(event, trigger)) return false;
-      if (trigger.code) return event.code === trigger.code;
-      return modifierOnlyTriggerMatchesEventCode(event.code, trigger);
-    }
-    function modifierOnlyTriggerMatchesEventCode(code, trigger) {
-      return trigger.altKey && (code === "AltLeft" || code === "AltRight") || trigger.ctrlKey && (code === "ControlLeft" || code === "ControlRight") || trigger.metaKey && (code === "MetaLeft" || code === "MetaRight") || trigger.shiftKey && (code === "ShiftLeft" || code === "ShiftRight");
-    }
-    function installDictionaryGuardInputHooks() {
-      if (overlayState.inputGuardInstalled) return;
-      const install = () => {
-        if (overlayState.inputGuardInstalled) return true;
-        const input = window.Input;
-        if (!input || typeof input._onKeyDown !== "function" || typeof input._onKeyUp !== "function") return false;
-        overlayState.inputGuardInstalled = true;
-        const originalKeyDown = input._onKeyDown;
-        const originalKeyUp = input._onKeyUp;
-        input._onKeyDown = function(event) {
-          if (dictionaryGuardInputShouldBlock(event)) {
-            overlayState.consumedGuardKeyCodes.add(event.code);
-            releaseRpgMakerInputState(event);
-            consumeEvent(event);
-            return;
-          }
-          return originalKeyDown.apply(this, arguments);
-        };
-        input._onKeyUp = function(event) {
-          if (overlayState.consumedGuardKeyCodes.has(event.code) || dictionaryGuardInputShouldBlock(event)) {
-            overlayState.consumedGuardKeyCodes.delete(event.code);
-            releaseRpgMakerInputState(event);
-            consumeEvent(event);
-            return;
-          }
-          return originalKeyUp.apply(this, arguments);
-        };
-        return true;
-      };
-      if (install()) return;
-      setTimeout(installDictionaryGuardInputHooks, 250);
-    }
-    function dictionaryGuardInputShouldBlock(event) {
-      if (!dictionaryGuardActive()) return false;
-      return settings.dictionaryDismissGuard.triggers.some((trigger) => guardTriggerMatchesKeyEvent(event, trigger));
-    }
-    function releaseRpgMakerInputState(event) {
-      const input = window.Input;
-      const keyName = input?.keyMapper?.[event.keyCode];
-      if (!keyName || !input._currentState) return;
-      input._currentState[keyName] = false;
-      if (input._latestButton === keyName) input._latestButton = null;
-    }
-    function consumeEvent(event) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
-    }
-    function clearGuardState() {
-      overlayState.consumedGuardKeyCodes.clear();
-    }
-    function focusGameTarget() {
-      const graphics = window.Graphics || {};
-      const canvas = graphics._canvas || document.querySelector("canvas");
-      const target = canvas || document.body || document.documentElement;
-      try {
-        window.focus();
-      } catch {
-      }
-      focusElement(document.documentElement);
-      focusElement(document.body);
-      focusElement(target);
-      if (canvas && canvas !== target) focusElement(canvas);
-    }
-    function focusElement(target) {
-      if (!target || typeof target.focus !== "function") return;
-      try {
-        if (target instanceof HTMLElement && !target.hasAttribute("tabindex")) {
-          target.tabIndex = -1;
-        }
-        if (target instanceof HTMLElement) {
-          target.style.outline = "none";
-        }
-        target.focus({ preventScroll: true });
-      } catch {
-        try {
-          target.focus();
-        } catch {
-        }
-      }
-    }
-    function refreshOverlayClasses() {
-      ensureOverlayDom();
-      const active = overlayIsActive();
-      overlayState.root.classList.toggle("mz-player-text-overlay-active", active);
-      overlayState.root.classList.toggle("mz-player-text-overlay-readable", settings.readableOverlay);
-      overlayState.root.classList.toggle("mz-player-text-overlay-reader", settings.readerMode);
-      if (!active) {
-        clearOverlayEntries();
-        clearGuardState();
-      }
-      scheduleTyranoScan();
-      scheduleFlush();
-    }
-    function overlayIsActive() {
-      return settings.overlayEnabled || settings.readableOverlay || settings.readerMode;
-    }
+  // player-runtime/engines/rpgmaker_mvmz/overlay.ts
+  var OWNER_ID = "__mzPlayerTextOverlayOwnerId";
+  function preferredRpgMakerDrawCall(calls, rawText) {
+    const text = String(rawText ?? "");
+    const matching = calls.filter((call) => call.text === text);
+    const candidates = matching.length > 0 ? matching : calls;
+    return candidates.findLast?.((call) => call.kind === "fill") || [...candidates].reverse().find((call) => call.kind === "fill") || candidates[candidates.length - 1] || null;
+  }
+  function renderedRpgMakerText(rawText, drawCall) {
+    return String(drawCall?.text ?? rawText ?? "");
+  }
+  function createRpgMakerOverlay({
+    entryIsVisible,
+    overlayIsActive,
+    overlayState,
+    ownerBelongsToScene,
+    refreshRpgMakerFontMetrics,
+    removeEntry,
+    scheduleFlush,
+    upsertEntry
+  }) {
     function installRpgMakerOverlayHooks() {
       const install = () => {
         if (!window.Bitmap || !window.Window_Base || !window.Window || !window.Graphics) return false;
@@ -1059,481 +1244,6 @@
       window.setTimeout(rehook, 750);
       window.setTimeout(rehook, 2500);
     }
-    function installTyranoOverlayHooks() {
-      if (overlayState.tyranoHooksInstalled) return;
-      const install = () => {
-        if (overlayState.tyranoHooksInstalled) return true;
-        const roots = tyranoRoots();
-        if (!roots.length) return false;
-        overlayState.tyranoHooksInstalled = true;
-        overlayState.tyranoObserver = new MutationObserver(scheduleTyranoScan);
-        for (const root of roots) {
-          overlayState.tyranoObserver.observe(root, {
-            subtree: true,
-            childList: true,
-            characterData: true,
-            attributes: true,
-            attributeFilter: ["class", "hidden", "style"]
-          });
-        }
-        if (document.fonts) {
-          document.fonts.ready.then(scheduleTyranoScan);
-          document.fonts.addEventListener?.("loadingdone", scheduleTyranoScan);
-        }
-        window.addEventListener("resize", scheduleTyranoScan);
-        scheduleTyranoScan();
-        return true;
-      };
-      if (install()) return;
-      setTimeout(installTyranoOverlayHooks, 250);
-    }
-    function installConstruct2OverlayHooks() {
-      if (overlayState.construct2HooksInstalled) return;
-      overlayState.construct2HooksInstalled = true;
-      const scan = () => {
-        overlayState.construct2ScanFrame = 0;
-        scanConstruct2Text();
-        overlayState.construct2ScanFrame = requestAnimationFrame(scan);
-      };
-      overlayState.construct2ScanFrame = requestAnimationFrame(scan);
-    }
-    function installCocosOverlayHooks() {
-      if (overlayState.cocosHooksInstalled) return;
-      const install = () => {
-        if (overlayState.cocosHooksInstalled) return true;
-        ensureOverlayDom();
-        const engine = resolveCocosEngine(window.System);
-        if (!engine) return false;
-        overlayState.cocosEngine = engine;
-        overlayState.cocosHooksInstalled = true;
-        if (document.fonts) {
-          document.fonts.ready.then(scheduleFlush);
-          document.fonts.addEventListener?.("loadingdone", scheduleFlush);
-        }
-        const scan = (now) => {
-          overlayState.cocosScanFrame = 0;
-          if (now - overlayState.cocosLastScanAt >= 50) {
-            overlayState.cocosLastScanAt = now;
-            scanCocosText();
-          }
-          overlayState.cocosScanFrame = requestAnimationFrame(scan);
-        };
-        overlayState.cocosScanFrame = requestAnimationFrame(scan);
-        return true;
-      };
-      if (install()) return;
-      setTimeout(installCocosOverlayHooks, 250);
-    }
-    function scanCocosText() {
-      if (!overlayIsActive()) return;
-      const engine = overlayState.cocosEngine;
-      const scene = engine?.director?.getScene?.();
-      const canvas = cocosCanvas(engine);
-      if (!scene || !(canvas instanceof HTMLCanvasElement)) return;
-      const seen = /* @__PURE__ */ new Set();
-      const visit = (node, insideRichText = false) => {
-        if (!node || node.activeInHierarchy === false || node.active === false) return;
-        const components = Array.isArray(node._components) ? node._components : [];
-        const richText = components.find((component) => cocosComponentIs(component, engine.RichText));
-        if (richText && cocosSourceIsVisible(richText)) {
-          captureCocosSource(engine, richText, canvas, true, seen);
-        }
-        if (!insideRichText && !richText) {
-          for (const component of components) {
-            if (cocosComponentIs(component, engine.Label) && cocosSourceIsVisible(component)) {
-              captureCocosSource(engine, component, canvas, false, seen);
-            }
-          }
-        }
-        for (const child of node.children || []) visit(child, insideRichText || Boolean(richText));
-      };
-      visit(scene);
-      for (const [key, entry] of overlayState.entries) {
-        if (entry.cocosSource && !seen.has(key)) removeEntry(key, entry);
-      }
-      scheduleFlush();
-    }
-    function cocosComponentIs(component, Component) {
-      if (!component || typeof Component !== "function") return false;
-      try {
-        return component instanceof Component;
-      } catch {
-        return false;
-      }
-    }
-    function captureCocosSource(engine, source, canvas, richText, seen) {
-      const rawText = source.string ?? source._string;
-      const text = richText ? plainCocosText(rawText) : String(rawText ?? "").replace(/\u00a0/gu, " ").trim();
-      if (!text) return;
-      const displayText = cocosRenderedText(source, text);
-      const rect = cocosPageRect(engine, source, canvas, displayText);
-      if (!rect) return;
-      const key = `cocos:${domSourceId(source)}`;
-      seen.add(key);
-      upsertEntry(key, {
-        cocosSource: source,
-        cocosRect: rect,
-        text,
-        displayText,
-        width: rect.width,
-        height: rect.height,
-        fontSize: rect.fontSize,
-        fontFace: cocosCssFontFamily(source),
-        fontStyle: source.isItalic || source._isItalic ? "italic" : "normal",
-        fontWeight: source.isBold || source._isBold ? "700" : "400",
-        textDecoration: source.isUnderline || source._isUnderline ? "underline" : "none",
-        lineHeight: rect.lineHeight,
-        paddingTop: rect.paddingTop,
-        textAlign: cocosTextAlign(source.horizontalAlign ?? source._horizontalAlign),
-        updatedAt: performance.now()
-      });
-    }
-    function cocosCanvas(engine) {
-      return engine?.game?.canvas || document.querySelector("#GameCanvas, canvas");
-    }
-    function cocosSourceIsVisible(source) {
-      const node = source?.node;
-      if (!node || node.isValid === false || node.activeInHierarchy === false) return false;
-      if (source.enabled === false || source.enabledInHierarchy === false) return false;
-      const colorAlpha = Number(source.color?.a ?? source._color?.a ?? 255);
-      if (colorAlpha <= 0) return false;
-      let current = node;
-      let guard = 0;
-      while (current && guard++ < 100) {
-        if (current.active === false || current.activeInHierarchy === false) return false;
-        current = current.parent;
-      }
-      return true;
-    }
-    function cocosPageRect(engine, source, canvas, text) {
-      const node = source.node;
-      const transform = node?.getComponent?.(engine.UITransform);
-      const camera = engine?.director?.root?.batcher2D?.getFirstRenderCamera?.(node);
-      const Vec3 = engine?.Vec3;
-      if (!transform || !camera || typeof Vec3 !== "function") return null;
-      const contentSize = transform.contentSize || transform._contentSize;
-      const anchor = transform.anchorPoint || transform._anchorPoint;
-      const width = Number(contentSize?.width);
-      const height = Number(contentSize?.height);
-      const anchorX = Number(anchor?.x);
-      const anchorY = Number(anchor?.y);
-      if (!(width > 0) || !(height > 0)) return null;
-      const localPoints = [
-        [-width * (Number.isFinite(anchorX) ? anchorX : 0.5), -height * (Number.isFinite(anchorY) ? anchorY : 0.5)],
-        [width * (1 - (Number.isFinite(anchorX) ? anchorX : 0.5)), -height * (Number.isFinite(anchorY) ? anchorY : 0.5)],
-        [width * (1 - (Number.isFinite(anchorX) ? anchorX : 0.5)), height * (1 - (Number.isFinite(anchorY) ? anchorY : 0.5))],
-        [-width * (Number.isFinite(anchorX) ? anchorX : 0.5), height * (1 - (Number.isFinite(anchorY) ? anchorY : 0.5))]
-      ];
-      const screenPoints = [];
-      try {
-        for (const [x, y] of localPoints) {
-          const world = transform.convertToWorldSpaceAR(new Vec3(x, y, 0), new Vec3());
-          const screen = cocosWorldToScreen(camera, Vec3, world);
-          if (!screen) return null;
-          screenPoints.push({ x: Number(screen.x), y: Number(screen.y) });
-        }
-      } catch {
-        return null;
-      }
-      const canvasRect = canvas.getBoundingClientRect();
-      const rect = cocosCssRectFromScreenPoints(screenPoints, canvasRect, canvas.width, canvas.height);
-      const geometry = cocosCssTransformFromScreenPoints(
-        screenPoints,
-        canvasRect,
-        canvas.width,
-        canvas.height,
-        width,
-        height
-      );
-      if (!rect || !geometry || geometry.bounds.left >= canvasRect.right || geometry.bounds.top >= canvasRect.bottom || geometry.bounds.right <= canvasRect.left || geometry.bounds.bottom <= canvasRect.top) {
-        return null;
-      }
-      const { fontSize, lineHeight } = cocosFontMetrics(
-        source,
-        engine?.view?.getScaleX?.() || 1
-      );
-      const lineCount = Math.max(1, String(text).split("\n").length);
-      const textHeight = Math.min(height, lineHeight * lineCount);
-      const verticalFactor = cocosVerticalAlignFactor(source.verticalAlign ?? source._verticalAlign);
-      return {
-        left: roundCocosCssNumber(geometry.left),
-        top: roundCocosCssNumber(geometry.top),
-        width: roundCocosCssNumber(geometry.width),
-        height: roundCocosCssNumber(geometry.height),
-        fontSize: roundCocosCssNumber(fontSize),
-        lineHeight: roundCocosCssNumber(lineHeight),
-        paddingTop: roundCocosCssNumber(Math.max(0, height - textHeight) * verticalFactor),
-        transform: `matrix(${roundCocosCssNumber(geometry.matrix.a)}, ${roundCocosCssNumber(geometry.matrix.b)}, ${roundCocosCssNumber(geometry.matrix.c)}, ${roundCocosCssNumber(geometry.matrix.d)}, 0, 0)`
-      };
-    }
-    function roundCocosCssNumber(value) {
-      return Math.round(value * 1e3) / 1e3;
-    }
-    function scanConstruct2Text() {
-      if (!overlayIsActive()) return;
-      const runtime = construct2Runtime();
-      if (!runtime || !Array.isArray(runtime.types_by_index)) return;
-      const seen = /* @__PURE__ */ new Set();
-      for (const type of runtime.types_by_index) {
-        if (!isConstruct2TextType(type) || !Array.isArray(type.instances)) continue;
-        for (const source of type.instances) {
-          if (!construct2SourceIsVisible(source)) continue;
-          const text = construct2SourceText(source);
-          if (!text) continue;
-          const rect = construct2PageRect(runtime, source);
-          if (!rect) continue;
-          const key = `construct2:${domSourceId(source)}`;
-          seen.add(key);
-          upsertEntry(key, {
-            constructSource: source,
-            constructRect: rect,
-            text,
-            width: rect.width,
-            height: rect.height,
-            fontSize: rect.fontSize,
-            fontFace: fontFamilyWithEmojiFallback(source.facename || "sans-serif"),
-            fontStyle: /italic/iu.test(String(source.fontstyle || "")) ? "italic" : "normal",
-            fontWeight: /bold/iu.test(String(source.fontstyle || "")) ? "700" : "400",
-            lineHeight: rect.lineHeight,
-            paddingTop: rect.paddingTop,
-            textAlign: construct2TextAlign(source.halign),
-            updatedAt: performance.now()
-          });
-        }
-      }
-      for (const [key, entry] of overlayState.entries) {
-        if (entry.constructSource && !seen.has(key)) removeEntry(key, entry);
-      }
-    }
-    function construct2Runtime() {
-      try {
-        return window.cr_getC2Runtime?.() || window.c2runtime || null;
-      } catch {
-        return window.c2runtime || null;
-      }
-    }
-    function isConstruct2TextType(type) {
-      const plugins = window.cr?.plugins_;
-      const plugin = type?.plugin;
-      if (!plugins || !plugin) return false;
-      return [plugins.Text, plugins.Spritefont2].some(
-        (Plugin) => typeof Plugin === "function" && plugin instanceof Plugin
-      );
-    }
-    function construct2SourceText(source) {
-      try {
-        source.rebuildText?.();
-      } catch {
-      }
-      if (Array.isArray(source.lines) && source.lines.length > 0) {
-        const lines = source.lines.map((line) => String(line?.text ?? ""));
-        if (lines.some(Boolean)) return lines.join("\n");
-      }
-      return String(source.text ?? "");
-    }
-    function construct2SourceIsVisible(source) {
-      if (!source || source.visible === false || Number(source.opacity) === 0) return false;
-      const layer = source.layer;
-      if (!layer || layer.visible === false || Number(layer.opacity) === 0) return false;
-      return true;
-    }
-    function construct2PageRect(runtime, source) {
-      const canvas = runtime.canvas || document.querySelector("#c2canvas");
-      const layer = source.layer;
-      if (!(canvas instanceof HTMLCanvasElement) || !layer) return null;
-      try {
-        source.update_bbox?.();
-      } catch {
-        return null;
-      }
-      const quad = source.bquad;
-      if (!quad) return null;
-      const points = [
-        [quad.tlx, quad.tly],
-        [quad.trx, quad.try_],
-        [quad.brx, quad.bry],
-        [quad.blx, quad.bly]
-      ].map(([x, y]) => ({
-        x: Number(layer.layerToCanvas?.(x, y, true, true)),
-        y: Number(layer.layerToCanvas?.(x, y, false, true))
-      }));
-      if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
-      const canvasRect = canvas.getBoundingClientRect();
-      if (canvasRect.width <= 0 || canvasRect.height <= 0) return null;
-      const sourceWidth = Math.abs(Number(source.width));
-      const sourceHeight = Math.abs(Number(source.height));
-      const geometry = cssTransformFromTopLeftCanvasQuad(
-        points,
-        canvasRect,
-        runtime.draw_width || canvas.width,
-        runtime.draw_height || canvas.height,
-        sourceWidth,
-        sourceHeight
-      );
-      if (!geometry || geometry.bounds.left >= canvasRect.right || geometry.bounds.top >= canvasRect.bottom || geometry.bounds.right <= canvasRect.left || geometry.bounds.bottom <= canvasRect.top) {
-        return null;
-      }
-      const sourceFontSize = Number(source.characterHeight) * (Number(source.characterScale) || 1) || Number(source.pxHeight) || 24;
-      const lineHeight = sourceFontSize + (Number(source.lineHeight) || Number(source.line_height_offset) || 0);
-      const textHeight = Math.max(
-        lineHeight,
-        Number(source.textHeight) || lineHeight * Math.max(1, source.lines?.length || 1)
-      );
-      return {
-        left: roundCocosCssNumber(geometry.left),
-        top: roundCocosCssNumber(geometry.top),
-        width: roundCocosCssNumber(geometry.width),
-        height: roundCocosCssNumber(geometry.height),
-        fontSize: roundCocosCssNumber(sourceFontSize),
-        lineHeight: roundCocosCssNumber(Math.max(1, lineHeight)),
-        paddingTop: roundCocosCssNumber(
-          (Number(source.valign) || 0) * Math.max(0, sourceHeight - textHeight)
-        ),
-        transform: `matrix(${roundCocosCssNumber(geometry.matrix.a)}, ${roundCocosCssNumber(geometry.matrix.b)}, ${roundCocosCssNumber(geometry.matrix.c)}, ${roundCocosCssNumber(geometry.matrix.d)}, 0, 0)`
-      };
-    }
-    function construct2TextAlign(halign) {
-      const value = Number(halign);
-      if (value >= 0.75) return "right";
-      if (value >= 0.25) return "center";
-      return "left";
-    }
-    function scheduleTyranoScan() {
-      if (!overlayState.tyranoHooksInstalled || overlayState.tyranoScanFrame) return;
-      overlayState.tyranoScanFrame = requestAnimationFrame(() => {
-        overlayState.tyranoScanFrame = 0;
-        scanTyranoText();
-      });
-    }
-    function scanTyranoText() {
-      if (!overlayIsActive()) return;
-      const roots = tyranoRoots();
-      if (!roots.length) return;
-      const sources = /* @__PURE__ */ new Set();
-      for (const root of roots) {
-        for (const message of root.querySelectorAll(".message_inner")) {
-          const paragraphs = message.querySelectorAll(":scope > p");
-          if (!paragraphs.length) {
-            sources.add(message);
-            continue;
-          }
-          for (const paragraph of paragraphs) {
-            const styledSpans = paragraph.querySelectorAll(":scope > span");
-            if (styledSpans.length) {
-              for (const span of styledSpans) sources.add(span);
-            } else {
-              sources.add(paragraph);
-            }
-          }
-        }
-        for (const source of root.querySelectorAll(".chara_name_area, [data-event-tag='glink'], .vchat-text-inner")) {
-          sources.add(source);
-        }
-      }
-      const activeKeys = /* @__PURE__ */ new Set();
-      for (const source of sources) {
-        const text = tyranoSourceText(source);
-        if (!text || !domSourceIsVisible(source)) continue;
-        const key = `tyrano:${domSourceId(source)}`;
-        const style = getComputedStyle(source);
-        const scale = domVisualScale(source);
-        activeKeys.add(key);
-        upsertEntry(key, {
-          domSource: source,
-          text,
-          fontSize: parseCssNumber(style.fontSize) || 24,
-          fontFace: fontFamilyWithEmojiFallback(style.fontFamily || "sans-serif"),
-          fontStyle: style.fontStyle,
-          fontWeight: style.fontWeight,
-          fontStretch: style.fontStretch,
-          fontVariant: style.fontVariant,
-          fontKerning: style.fontKerning,
-          fontOpticalSizing: style.fontOpticalSizing,
-          fontFeatureSettings: style.fontFeatureSettings,
-          fontVariationSettings: style.fontVariationSettings,
-          fontSynthesis: style.fontSynthesis,
-          lineHeightCss: style.lineHeight || "normal",
-          textAlign: style.textAlign || "left",
-          textAlignLast: style.textAlignLast,
-          direction: style.direction,
-          letterSpacing: style.letterSpacing,
-          wordSpacing: style.wordSpacing,
-          wordBreak: style.wordBreak,
-          overflowWrap: style.overflowWrap,
-          whiteSpace: style.whiteSpace,
-          writingMode: style.writingMode,
-          textOrientation: style.textOrientation,
-          textRendering: style.textRendering,
-          textTransform: style.textTransform,
-          textIndent: style.textIndent,
-          textDecorationLine: style.textDecorationLine,
-          textDecorationStyle: style.textDecorationStyle,
-          textDecorationThickness: style.textDecorationThickness,
-          paddingTop: style.paddingTop,
-          paddingRight: style.paddingRight,
-          paddingBottom: style.paddingBottom,
-          paddingLeft: style.paddingLeft,
-          borderTopWidth: style.borderTopWidth,
-          borderRightWidth: style.borderRightWidth,
-          borderBottomWidth: style.borderBottomWidth,
-          borderLeftWidth: style.borderLeftWidth,
-          visualScaleX: scale.x,
-          visualScaleY: scale.y,
-          updatedAt: performance.now()
-        });
-      }
-      for (const [key, entry] of overlayState.entries) {
-        if (entry.domSource && !activeKeys.has(key)) removeEntry(key, entry);
-      }
-      scheduleFlush();
-    }
-    function tyranoRoots() {
-      return Array.from(document.querySelectorAll("#tyrano_base, #vchat_base"));
-    }
-    function domSourceId(source) {
-      let id = overlayState.domSourceIds.get(source);
-      if (!id) {
-        id = overlayState.nextDomSourceId++;
-        overlayState.domSourceIds.set(source, id);
-      }
-      return id;
-    }
-    function tyranoSourceText(source) {
-      const text = typeof source.innerText === "string" ? source.innerText : source.textContent;
-      return String(text || "").replace(/\u00a0/g, " ").trim();
-    }
-    function parseCssNumber(value) {
-      const parsed = Number.parseFloat(String(value || ""));
-      return Number.isFinite(parsed) ? parsed : 0;
-    }
-    function domVisualScale(source) {
-      const root = source.closest("#tyrano_base, #vchat_base");
-      if (!root) return { x: 1, y: 1 };
-      const rect = root.getBoundingClientRect();
-      const style = getComputedStyle(root);
-      const layoutWidth = parseCssNumber(style.width) || root.offsetWidth;
-      const layoutHeight = parseCssNumber(style.height) || root.offsetHeight;
-      return {
-        x: positiveScale(rect.width, layoutWidth),
-        y: positiveScale(rect.height, layoutHeight)
-      };
-    }
-    function positiveScale(rendered, layout) {
-      const scale = Number(rendered) / Number(layout);
-      return Number.isFinite(scale) && scale > 0 ? scale : 1;
-    }
-    function scaledCssLength(value, scale) {
-      const text = String(value || "");
-      const match = text.match(/^(-?\d+(?:\.\d+)?)px$/);
-      return match ? `${Number(match[1]) * scale}px` : text || "normal";
-    }
-    function domSourceIsVisible(source) {
-      if (!source?.isConnected) return false;
-      const style = getComputedStyle(source);
-      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-      const rect = source.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    }
     function installCanvasTextHooks() {
       const canvasContext = window.CanvasRenderingContext2D;
       const prototype = canvasContext && canvasContext.prototype;
@@ -1591,11 +1301,6 @@
         actualBoundingBoxAscent: Number(metrics?.actualBoundingBoxAscent),
         actualBoundingBoxDescent: Number(metrics?.actualBoundingBoxDescent)
       });
-    }
-    function preferredRpgMakerDrawCall(calls, rawText) {
-      const text = String(rawText ?? "");
-      const matching = calls.filter((call) => call.text === text);
-      return matching.findLast?.((call) => call.kind === "fill") || [...matching].reverse().find((call) => call.kind === "fill") || matching[matching.length - 1] || null;
     }
     function trackBitmapOwner(bitmap, owner) {
       if (!bitmap || !owner) return;
@@ -1713,30 +1418,11 @@
         if (group.owner === owner) overlayState.lineGroups.delete(key);
       }
     }
-    function removeEntry(key, entry) {
-      if (entry) forgetLineGroupsForEntry(key);
-      if (entry.element) entry.element.remove();
-      overlayState.entries.delete(key);
-    }
-    function forgetLineGroupsForEntry(entryKey) {
-      for (const [key, group] of overlayState.lineGroups) {
-        if (group.entryKey === entryKey) overlayState.lineGroups.delete(key);
-      }
-    }
-    function clearOverlayEntries() {
-      if (overlayState.root) overlayState.root.replaceChildren();
-      overlayState.entries.clear();
-      overlayState.lineGroups.clear();
-      for (const timer of overlayState.textLogTimers.values()) window.clearTimeout(timer);
-      overlayState.textLogTimers.clear();
-      overlayState.textLogValues.clear();
-      overlayState.raf = 0;
-    }
     function captureBitmapText(bitmap, rawText, x, y, maxWidth, lineHeight, align, drawCall) {
       const owner = overlayState.bitmapOwners.get(bitmap);
       if (!owner || rawText === void 0 || rawText === null) return;
       trackBitmapOwner(bitmap, owner);
-      const text = String(rawText);
+      const text = renderedRpgMakerText(rawText, drawCall);
       if (!text) return;
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       const height = Number(lineHeight) || owner.lineHeight?.() || bitmap.fontSize || 24;
@@ -1919,17 +1605,6 @@
         return Math.max(1, text.length * (canvasFontSize(context, bitmap, null) || 24) * 0.6);
       }
     }
-    function canvasFontSize(context, bitmap, owner) {
-      const match = String(context.font || "").match(/(\d+(?:\.\d+)?)px/);
-      const parsed = match ? Number(match[1]) : 0;
-      return parsed || bitmap?.fontSize || owner?.standardFontSize?.() || 24;
-    }
-    function canvasFontFace(context) {
-      const font = String(context.font || "").trim();
-      if (!font) return "";
-      const match = font.match(/\d+(?:\.\d+)?px(?:\/[^\s]+)?\s+(.+)$/);
-      return match ? match[1] : "";
-    }
     function rpgMakerCanvasBaseline(drawCall, y, lineHeight, fontSize) {
       if (!Number.isFinite(drawCall?.y)) {
         return y + lineHeight / 2 + fontSize * 0.35;
@@ -2015,40 +1690,427 @@
         textAlign: "left"
       };
     }
-    function upsertEntry(key, next) {
-      const current = overlayState.entries.get(key) || {};
-      const textChanged = current.text !== next.text;
-      Object.assign(current, next);
-      overlayState.entries.set(key, current);
-      if (textChanged) scheduleTextLog(key, current);
-      scheduleFlush();
+    return { install: installRpgMakerOverlayHooks };
+  }
+
+  // player-runtime/engines/tyrano/overlay.ts
+  function createTyranoOverlayAdapter({
+    domSourceId,
+    overlayIsActive,
+    overlayState,
+    removeEntry,
+    scheduleFlush,
+    upsertEntry
+  }) {
+    function install() {
+      if (overlayState.tyranoHooksInstalled) return;
+      const tryInstall = () => {
+        if (overlayState.tyranoHooksInstalled) return true;
+        const roots = tyranoRoots();
+        if (!roots.length) return false;
+        overlayState.tyranoHooksInstalled = true;
+        overlayState.tyranoObserver = new MutationObserver(scheduleScan);
+        for (const root of roots) {
+          overlayState.tyranoObserver.observe(root, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ["class", "hidden", "style"]
+          });
+        }
+        if (document.fonts) {
+          document.fonts.ready.then(scheduleScan);
+          document.fonts.addEventListener?.("loadingdone", scheduleScan);
+        }
+        window.addEventListener("resize", scheduleScan);
+        scheduleScan();
+        return true;
+      };
+      if (tryInstall()) return;
+      setTimeout(install, 250);
     }
-    function scheduleTextLog(key, entry) {
-      if (!entryIsLoggable(entry)) return;
-      const text = String(entry.text || "");
-      const dedupeKey = textLogDedupeKey(text);
-      if (!dedupeKey) return;
-      replaceTextLogTimer(key, () => {
-        overlayState.textLogTimers.delete(key);
-        if (overlayState.textLogValues.get(key) === dedupeKey) return;
-        overlayState.textLogValues.set(key, dedupeKey);
-        postParentMessage({ type: "text-log", gameId: config.gameId, text, at: Date.now() });
+    function scheduleScan() {
+      if (!overlayState.tyranoHooksInstalled || overlayState.tyranoScanFrame) return;
+      overlayState.tyranoScanFrame = requestAnimationFrame(() => {
+        overlayState.tyranoScanFrame = 0;
+        scanText();
       });
     }
-    function textLogDedupeKey(text) {
-      return text.replace(/\s+/g, " ").trim();
+    function scanText() {
+      if (!overlayIsActive()) return;
+      const roots = tyranoRoots();
+      if (!roots.length) return;
+      const sources = /* @__PURE__ */ new Set();
+      for (const root of roots) {
+        for (const message of root.querySelectorAll(".message_inner")) {
+          const paragraphs = message.querySelectorAll(":scope > p");
+          if (!paragraphs.length) {
+            sources.add(message);
+            continue;
+          }
+          for (const paragraph of paragraphs) {
+            const styledSpans = paragraph.querySelectorAll(":scope > span");
+            if (styledSpans.length) {
+              for (const span of styledSpans) sources.add(span);
+            } else {
+              sources.add(paragraph);
+            }
+          }
+        }
+        for (const source of root.querySelectorAll(
+          ".chara_name_area, [data-event-tag='glink'], .vchat-text-inner"
+        )) {
+          sources.add(source);
+        }
+      }
+      const activeKeys = /* @__PURE__ */ new Set();
+      for (const source of sources) {
+        const text = tyranoSourceText(source);
+        if (!text || !domSourceIsVisible(source)) continue;
+        const key = `tyrano:${domSourceId(source)}`;
+        const style = getComputedStyle(source);
+        const scale = domVisualScale(source);
+        activeKeys.add(key);
+        upsertEntry(key, {
+          domSource: source,
+          text,
+          fontSize: parseCssNumber(style.fontSize) || 24,
+          fontFace: fontFamilyWithEmojiFallback(style.fontFamily || "sans-serif"),
+          fontStyle: style.fontStyle,
+          fontWeight: style.fontWeight,
+          fontStretch: style.fontStretch,
+          fontVariant: style.fontVariant,
+          fontKerning: style.fontKerning,
+          fontOpticalSizing: style.fontOpticalSizing,
+          fontFeatureSettings: style.fontFeatureSettings,
+          fontVariationSettings: style.fontVariationSettings,
+          fontSynthesis: style.fontSynthesis,
+          lineHeightCss: style.lineHeight || "normal",
+          textAlign: style.textAlign || "left",
+          textAlignLast: style.textAlignLast,
+          direction: style.direction,
+          letterSpacing: style.letterSpacing,
+          wordSpacing: style.wordSpacing,
+          wordBreak: style.wordBreak,
+          overflowWrap: style.overflowWrap,
+          whiteSpace: style.whiteSpace,
+          writingMode: style.writingMode,
+          textOrientation: style.textOrientation,
+          textRendering: style.textRendering,
+          textTransform: style.textTransform,
+          textIndent: style.textIndent,
+          textDecorationLine: style.textDecorationLine,
+          textDecorationStyle: style.textDecorationStyle,
+          textDecorationThickness: style.textDecorationThickness,
+          paddingTop: style.paddingTop,
+          paddingRight: style.paddingRight,
+          paddingBottom: style.paddingBottom,
+          paddingLeft: style.paddingLeft,
+          borderTopWidth: style.borderTopWidth,
+          borderRightWidth: style.borderRightWidth,
+          borderBottomWidth: style.borderBottomWidth,
+          borderLeftWidth: style.borderLeftWidth,
+          visualScaleX: scale.x,
+          visualScaleY: scale.y,
+          updatedAt: performance.now()
+        });
+      }
+      for (const [key, entry] of overlayState.entries) {
+        if (entry.domSource && !activeKeys.has(key)) removeEntry(key, entry);
+      }
+      scheduleFlush();
     }
-    function replaceTextLogTimer(key, callback) {
-      const existing = overlayState.textLogTimers.get(key);
-      if (existing) window.clearTimeout(existing);
-      const timer = window.setTimeout(callback, TEXT_LOG_DELAY_MS);
-      overlayState.textLogTimers.set(key, timer);
+    return { install, scheduleScan };
+  }
+  function domSourceIsVisible(source) {
+    if (!source?.isConnected) return false;
+    const style = getComputedStyle(source);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+      return false;
     }
-    function entryIsLoggable(entry) {
-      if (entry?.domSource || entry?.constructSource || entry?.cocosSource) return true;
-      const name = entry?.owner?.constructor?.name || "";
-      return /^(Window_Message|Window_ChoiceList|Window_NameBox|Window_ScrollText)$/.test(name);
+    const rect = source.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+  function scaledCssLength(value, scale) {
+    const text = String(value || "");
+    const match = text.match(/^(-?\d+(?:\.\d+)?)px$/);
+    return match ? `${Number(match[1]) * scale}px` : text || "normal";
+  }
+  function tyranoRoots() {
+    return Array.from(document.querySelectorAll("#tyrano_base, #vchat_base"));
+  }
+  function tyranoSourceText(source) {
+    const text = typeof source.innerText === "string" ? source.innerText : source.textContent;
+    return String(text || "").replace(/\u00a0/g, " ").trim();
+  }
+  function parseCssNumber(value) {
+    const parsed = Number.parseFloat(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function domVisualScale(source) {
+    const root = source.closest("#tyrano_base, #vchat_base");
+    if (!root) return { x: 1, y: 1 };
+    const rect = root.getBoundingClientRect();
+    const style = getComputedStyle(root);
+    const layoutWidth = parseCssNumber(style.width) || root.offsetWidth;
+    const layoutHeight = parseCssNumber(style.height) || root.offsetHeight;
+    return {
+      x: positiveScale(rect.width, layoutWidth),
+      y: positiveScale(rect.height, layoutHeight)
+    };
+  }
+  function positiveScale(rendered, layout) {
+    const scale = Number(rendered) / Number(layout);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+  }
+
+  // player-runtime/bridge/overlay/inputGuard.ts
+  function createOverlayInputController({
+    overlayState,
+    postParentMessage,
+    settings
+  }) {
+    function installOverlayFocusReturn() {
+      if (!overlayState.root || overlayState.focusReturnInstalled) return;
+      overlayState.focusReturnInstalled = true;
+      const trackOverlayText = (event) => {
+        const entry = overlayTextEntry(event.target);
+        if (!entry) return;
+        overlayState.hoveredTextEntry = entry;
+      };
+      const clearOverlayText = (event) => {
+        if (!overlayState.hoveredTextEntry) return;
+        if (event.relatedTarget instanceof Node && overlayState.root.contains(event.relatedTarget)) {
+          return;
+        }
+        overlayState.hoveredTextEntry = null;
+      };
+      const consumeOverlayTextPointerEvent = (event) => {
+        const entry = overlayTextEntry(event.target);
+        if (!entry) return;
+        overlayState.hoveredTextEntry = entry;
+        event.stopPropagation();
+      };
+      const restoreGameFocusAfterSurfacePointer = (event) => {
+        if (overlayTextEntry(event.target) || !eventTargetsGameSurface(event.target))
+          return;
+        if (!FOCUS_RETURN_EVENT_TYPES.includes(event.type)) return;
+        window.setTimeout(() => {
+          focusGameTarget();
+          returnFocus();
+        }, 0);
+      };
+      const returnFocus = () => {
+        if (!settings.readerMode) return;
+        window.setTimeout(() => {
+          postParentMessage({ type: "return-focus" });
+        }, 0);
+      };
+      for (const type of [
+        "pointerdown",
+        "pointerup",
+        "mousedown",
+        "mouseup",
+        "click",
+        "dblclick",
+        "contextmenu",
+        "touchstart",
+        "touchend"
+      ]) {
+        window.addEventListener(type, consumeOverlayTextPointerEvent, true);
+        window.addEventListener(type, restoreGameFocusAfterSurfacePointer, true);
+      }
+      overlayState.root.addEventListener("pointerover", trackOverlayText, true);
+      overlayState.root.addEventListener("pointermove", trackOverlayText, true);
+      overlayState.root.addEventListener("pointerdown", trackOverlayText, true);
+      overlayState.root.addEventListener("pointerup", returnFocus, true);
+      overlayState.root.addEventListener("mouseup", returnFocus, true);
+      overlayState.root.addEventListener("touchend", returnFocus, true);
+      overlayState.root.addEventListener("click", returnFocus, true);
+      overlayState.root.addEventListener("pointerout", clearOverlayText, true);
+      for (const type of ["keydown", "keypress", "keyup"]) {
+        window.addEventListener(type, handleDictionaryGuardKeyEvent, true);
+      }
+      window.addEventListener("blur", clearGuardState, true);
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (document.visibilityState !== "visible") clearGuardState();
+        },
+        true
+      );
     }
+    function dictionaryGuardActive() {
+      return Boolean(
+        settings.overlayEnabled && settings.dictionaryDismissGuard?.enabled && settings.dictionaryDismissGuard.triggers?.length
+      );
+    }
+    function installDictionaryGuardInputHooks() {
+      if (overlayState.inputGuardInstalled) return;
+      const install = () => {
+        if (overlayState.inputGuardInstalled) return true;
+        const input = window.Input;
+        if (!input || typeof input._onKeyDown !== "function" || typeof input._onKeyUp !== "function") {
+          return false;
+        }
+        overlayState.inputGuardInstalled = true;
+        const originalKeyDown = input._onKeyDown;
+        const originalKeyUp = input._onKeyUp;
+        input._onKeyDown = function(event) {
+          if (dictionaryGuardInputShouldBlock(event)) {
+            overlayState.consumedGuardKeyCodes.add(event.code);
+            releaseRpgMakerInputState(event);
+            consumeEvent(event);
+            return;
+          }
+          return originalKeyDown.apply(this, arguments);
+        };
+        input._onKeyUp = function(event) {
+          if (overlayState.consumedGuardKeyCodes.has(event.code) || dictionaryGuardInputShouldBlock(event)) {
+            overlayState.consumedGuardKeyCodes.delete(event.code);
+            releaseRpgMakerInputState(event);
+            consumeEvent(event);
+            return;
+          }
+          return originalKeyUp.apply(this, arguments);
+        };
+        return true;
+      };
+      if (install()) return;
+      setTimeout(installDictionaryGuardInputHooks, 250);
+    }
+    function clearGuardState() {
+      overlayState.consumedGuardKeyCodes.clear();
+    }
+    function focusGameTarget() {
+      const graphics = window.Graphics || {};
+      const canvas = graphics._canvas || document.querySelector("canvas");
+      const target = canvas || document.body || document.documentElement;
+      try {
+        window.focus();
+      } catch {
+      }
+      focusElement(document.documentElement);
+      focusElement(document.body);
+      focusElement(target);
+      if (canvas && canvas !== target) focusElement(canvas);
+    }
+    function handleDictionaryGuardKeyEvent(event) {
+      if (event.code === "Escape") {
+        clearGuardState();
+        return;
+      }
+      maybeConsumeDictionaryDismissKeyEvent(event);
+    }
+    function maybeConsumeDictionaryDismissKeyEvent(event) {
+      if (event.type === "keyup" && overlayState.consumedGuardKeyCodes.has(event.code)) {
+        overlayState.consumedGuardKeyCodes.delete(event.code);
+        releaseRpgMakerInputState(event);
+        consumeEvent(event);
+        return true;
+      }
+      if (event.type === "keyup" && guardReleaseMatchesKeyEvent(event)) {
+        overlayState.consumedGuardKeyCodes.delete(event.code);
+        releaseRpgMakerInputState(event);
+        consumeEvent(event);
+        return true;
+      }
+      if (!dictionaryGuardActive()) return false;
+      const match = settings.dictionaryDismissGuard.triggers.find(
+        (trigger) => guardTriggerMatchesKeyEvent(event, trigger)
+      );
+      if (!match) return false;
+      releaseRpgMakerInputState(event);
+      consumeEvent(event);
+      if (event.type === "keydown")
+        overlayState.consumedGuardKeyCodes.add(event.code);
+      if (event.type === "keyup")
+        overlayState.consumedGuardKeyCodes.delete(event.code);
+      return true;
+    }
+    function dictionaryGuardInputShouldBlock(event) {
+      if (!dictionaryGuardActive()) return false;
+      return settings.dictionaryDismissGuard.triggers.some(
+        (trigger) => guardTriggerMatchesKeyEvent(event, trigger)
+      );
+    }
+    function guardReleaseMatchesKeyEvent(event) {
+      if (!settings.dictionaryDismissGuard?.enabled || !settings.dictionaryDismissGuard.triggers?.length) {
+        return false;
+      }
+      return settings.dictionaryDismissGuard.triggers.some((trigger) => {
+        if (trigger.code) return event.code === trigger.code;
+        return modifierOnlyTriggerMatchesEventCode(event.code, trigger);
+      });
+    }
+    function guardTriggerMatchesKeyEvent(event, trigger) {
+      if (!exactModifierMatch(event, trigger)) return false;
+      if (trigger.code) return event.code === trigger.code;
+      return modifierOnlyTriggerMatchesEventCode(event.code, trigger);
+    }
+    function modifierOnlyTriggerMatchesEventCode(code, trigger) {
+      return trigger.altKey && (code === "AltLeft" || code === "AltRight") || trigger.ctrlKey && (code === "ControlLeft" || code === "ControlRight") || trigger.metaKey && (code === "MetaLeft" || code === "MetaRight") || trigger.shiftKey && (code === "ShiftLeft" || code === "ShiftRight");
+    }
+    function releaseRpgMakerInputState(event) {
+      const input = window.Input;
+      const keyName = input?.keyMapper?.[event.keyCode];
+      if (!keyName || !input._currentState) return;
+      input._currentState[keyName] = false;
+      if (input._latestButton === keyName) input._latestButton = null;
+    }
+    function consumeEvent(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+    }
+    return {
+      clearGuardState,
+      dictionaryGuardActive,
+      focusGameTarget,
+      installDictionaryGuardInputHooks,
+      installOverlayFocusReturn
+    };
+  }
+  function overlayTextEntry(target) {
+    return target instanceof Element ? target.closest(".mz-player-text-overlay-entry") : null;
+  }
+  function eventTargetsGameSurface(target) {
+    if (target === document || target === document.body || target === document.documentElement) {
+      return true;
+    }
+    return target instanceof Element && Boolean(target.closest("canvas, video"));
+  }
+  function focusElement(target) {
+    if (!target || typeof target.focus !== "function") return;
+    try {
+      if (target instanceof HTMLElement && !target.hasAttribute("tabindex")) {
+        target.tabIndex = -1;
+      }
+      if (target instanceof HTMLElement) target.style.outline = "none";
+      target.focus({ preventScroll: true });
+    } catch {
+      try {
+        target.focus();
+      } catch {
+      }
+    }
+  }
+
+  // player-runtime/bridge/overlay/renderer.ts
+  function createOverlayRenderer({
+    cocosSourceIsVisible: cocosSourceIsVisible2,
+    construct2SourceIsVisible: construct2SourceIsVisible2,
+    construct2TextSegments: construct2TextSegments2,
+    domSourceIsVisible: domSourceIsVisible2,
+    ensureOverlayDom,
+    overlayIsActive,
+    overlayState,
+    removeEntry,
+    scaledCssLength: scaledCssLength2
+  }) {
     function scheduleFlush() {
       if (overlayState.raf) return;
       overlayState.raf = requestAnimationFrame(() => {
@@ -2129,11 +2191,11 @@
           setStyleIfChanged(entry.element, "fontFeatureSettings", entry.fontFeatureSettings || "normal");
           setStyleIfChanged(entry.element, "fontVariationSettings", entry.fontVariationSettings || "normal");
           setStyleIfChanged(entry.element, "fontSynthesis", entry.fontSynthesis || "weight style small-caps");
-          setStyleIfChanged(entry.element, "lineHeight", scaledCssLength(entry.lineHeightCss, scaleY));
+          setStyleIfChanged(entry.element, "lineHeight", scaledCssLength2(entry.lineHeightCss, scaleY));
           setStyleIfChanged(entry.element, "whiteSpace", entry.whiteSpace || "pre-wrap");
           setStyleIfChanged(entry.element, "direction", entry.direction || "ltr");
-          setStyleIfChanged(entry.element, "letterSpacing", scaledCssLength(entry.letterSpacing, scaleX));
-          setStyleIfChanged(entry.element, "wordSpacing", scaledCssLength(entry.wordSpacing, scaleX));
+          setStyleIfChanged(entry.element, "letterSpacing", scaledCssLength2(entry.letterSpacing, scaleX));
+          setStyleIfChanged(entry.element, "wordSpacing", scaledCssLength2(entry.wordSpacing, scaleX));
           setStyleIfChanged(entry.element, "wordBreak", entry.wordBreak || "normal");
           setStyleIfChanged(entry.element, "overflowWrap", entry.overflowWrap || "normal");
           setStyleIfChanged(entry.element, "writingMode", entry.writingMode || "horizontal-tb");
@@ -2141,21 +2203,21 @@
           setStyleIfChanged(entry.element, "textRendering", entry.textRendering || "auto");
           setStyleIfChanged(entry.element, "textTransform", entry.textTransform || "none");
           setStyleIfChanged(entry.element, "textAlignLast", entry.textAlignLast || "auto");
-          setStyleIfChanged(entry.element, "textIndent", scaledCssLength(entry.textIndent, scaleX));
+          setStyleIfChanged(entry.element, "textIndent", scaledCssLength2(entry.textIndent, scaleX));
           setStyleIfChanged(entry.element, "textDecorationLine", entry.textDecorationLine || "none");
           setStyleIfChanged(entry.element, "textDecorationStyle", entry.textDecorationStyle || "solid");
-          setStyleIfChanged(entry.element, "textDecorationThickness", scaledCssLength(entry.textDecorationThickness, scaleY));
-          setStyleIfChanged(entry.element, "paddingTop", scaledCssLength(entry.paddingTop, scaleY));
-          setStyleIfChanged(entry.element, "paddingRight", scaledCssLength(entry.paddingRight, scaleX));
-          setStyleIfChanged(entry.element, "paddingBottom", scaledCssLength(entry.paddingBottom, scaleY));
-          setStyleIfChanged(entry.element, "paddingLeft", scaledCssLength(entry.paddingLeft, scaleX));
+          setStyleIfChanged(entry.element, "textDecorationThickness", scaledCssLength2(entry.textDecorationThickness, scaleY));
+          setStyleIfChanged(entry.element, "paddingTop", scaledCssLength2(entry.paddingTop, scaleY));
+          setStyleIfChanged(entry.element, "paddingRight", scaledCssLength2(entry.paddingRight, scaleX));
+          setStyleIfChanged(entry.element, "paddingBottom", scaledCssLength2(entry.paddingBottom, scaleY));
+          setStyleIfChanged(entry.element, "paddingLeft", scaledCssLength2(entry.paddingLeft, scaleX));
           setStyleIfChanged(entry.element, "boxSizing", "border-box");
           setStyleIfChanged(entry.element, "borderStyle", "solid");
           setStyleIfChanged(entry.element, "borderColor", "transparent");
-          setStyleIfChanged(entry.element, "borderTopWidth", scaledCssLength(entry.borderTopWidth, scaleY));
-          setStyleIfChanged(entry.element, "borderRightWidth", scaledCssLength(entry.borderRightWidth, scaleX));
-          setStyleIfChanged(entry.element, "borderBottomWidth", scaledCssLength(entry.borderBottomWidth, scaleY));
-          setStyleIfChanged(entry.element, "borderLeftWidth", scaledCssLength(entry.borderLeftWidth, scaleX));
+          setStyleIfChanged(entry.element, "borderTopWidth", scaledCssLength2(entry.borderTopWidth, scaleY));
+          setStyleIfChanged(entry.element, "borderRightWidth", scaledCssLength2(entry.borderRightWidth, scaleX));
+          setStyleIfChanged(entry.element, "borderBottomWidth", scaledCssLength2(entry.borderBottomWidth, scaleY));
+          setStyleIfChanged(entry.element, "borderLeftWidth", scaledCssLength2(entry.borderLeftWidth, scaleX));
         } else if (entry.constructSource) {
           setStyleIfChanged(entry.element, "whiteSpace", "pre");
         } else if (entry.cocosSource) {
@@ -2290,7 +2352,7 @@
           element.className = "mz-player-text-overlay-entry-construct2-line";
           element.setAttribute("aria-label", line.text);
           element.replaceChildren(
-            ...construct2TextSegments(line.text).map((character) => {
+            ...construct2TextSegments2(line.text).map((character) => {
               const characterElement = document.createElement("span");
               characterElement.className = "mz-player-text-overlay-entry-construct2-character";
               characterElement.textContent = character;
@@ -2336,7 +2398,7 @@
         setStyleIfChanged(element, "transform", "");
         let characterX = 0;
         const characterElements = [...element.children];
-        const characters = construct2TextSegments(line.text);
+        const characters = construct2TextSegments2(line.text);
         for (let characterIndex = 0; characterIndex < characters.length; characterIndex += 1) {
           const character = characters[characterIndex];
           const characterElement = characterElements[characterIndex];
@@ -2367,15 +2429,6 @@
           );
           characterX += renderedCharacterWidth + characterSpacing;
         }
-      }
-    }
-    function construct2TextSegments(text) {
-      const value = String(text ?? "");
-      try {
-        const segmenter = new Intl.Segmenter(void 0, { granularity: "grapheme" });
-        return [...segmenter.segment(value)].map((segment) => segment.segment);
-      } catch {
-        return Array.from(value);
       }
     }
     function setStyleIfChanged(element, name, value) {
@@ -2438,9 +2491,9 @@
       return result;
     }
     function entryIsVisible(entry) {
-      if (entry.domSource) return domSourceIsVisible(entry.domSource);
-      if (entry.constructSource) return construct2SourceIsVisible(entry.constructSource);
-      if (entry.cocosSource) return cocosSourceIsVisible(entry.cocosSource);
+      if (entry.domSource) return domSourceIsVisible2(entry.domSource);
+      if (entry.constructSource) return construct2SourceIsVisible2(entry.constructSource);
+      if (entry.cocosSource) return cocosSourceIsVisible2(entry.cocosSource);
       const owner = entry.owner;
       if (!owner || owner.destroyed || !owner.parent) return false;
       if (!ownerBelongsToActiveScene(owner)) return false;
@@ -2573,160 +2626,328 @@
         height: roundCssPixel(clipped.height * scaleY)
       };
     }
-    function displayObjectPageBounds(object, canvasRect, canvasWidth, canvasHeight) {
-      if (!object || !displayObjectIsVisible(object)) return null;
-      const frame = spriteFrame(object);
-      if (frame.width <= 0 || frame.height <= 0) return null;
-      const anchorX = Number(object.anchor?.x) || 0;
-      const anchorY = Number(object.anchor?.y) || 0;
-      const matrix = object.worldTransform || object.transform?.worldTransform;
-      let points;
-      if (matrix && [matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty].every(Number.isFinite)) {
-        const left2 = -anchorX * frame.width;
-        const top2 = -anchorY * frame.height;
-        points = [
-          transformPoint(matrix, left2, top2),
-          transformPoint(matrix, left2 + frame.width, top2),
-          transformPoint(matrix, left2 + frame.width, top2 + frame.height),
-          transformPoint(matrix, left2, top2 + frame.height)
-        ];
-      } else {
-        const position = ownerWorldPosition(object);
-        const left2 = position.x - anchorX * frame.width;
-        const top2 = position.y - anchorY * frame.height;
-        points = [
-          { x: left2, y: top2 },
-          { x: left2 + frame.width, y: top2 },
-          { x: left2 + frame.width, y: top2 + frame.height },
-          { x: left2, y: top2 + frame.height }
-        ];
+    return {
+      entryIsVisible,
+      ownerBelongsToScene,
+      refreshRpgMakerFontMetrics,
+      scheduleFlush
+    };
+  }
+
+  // player-runtime/bridge/overlay/state.ts
+  function createOverlayState() {
+    return {
+      nextOwnerId: 1,
+      bitmapOwners: /* @__PURE__ */ new WeakMap(),
+      contextOwners: /* @__PURE__ */ new WeakMap(),
+      entries: /* @__PURE__ */ new Map(),
+      lineGroups: /* @__PURE__ */ new Map(),
+      textLogTimers: /* @__PURE__ */ new Map(),
+      textLogValues: /* @__PURE__ */ new Map(),
+      domSourceIds: /* @__PURE__ */ new WeakMap(),
+      consumedGuardKeyCodes: /* @__PURE__ */ new Set(),
+      hoveredTextEntry: null,
+      raf: 0,
+      lastScene: null,
+      installedHooks: false,
+      rpgMakerRehookScheduled: false,
+      inputGuardInstalled: false,
+      sceneHooksInstalled: false,
+      sceneBaseHooksInstalled: false,
+      focusReturnInstalled: false,
+      tyranoHooksInstalled: false,
+      tyranoObserver: null,
+      tyranoScanFrame: 0,
+      construct2HooksInstalled: false,
+      construct2ScanFrame: 0,
+      cocosEngine: null,
+      cocosHooksInstalled: false,
+      cocosScanFrame: 0,
+      cocosLastScanAt: 0,
+      nextDomSourceId: 1,
+      canvasTextCaptureDepth: 0,
+      activeRpgMakerDrawCapture: null,
+      baselineProbeCache: /* @__PURE__ */ new Map(),
+      measureContext: null,
+      root: null,
+      style: null
+    };
+  }
+
+  // player-runtime/bridge/overlay/styles.ts
+  var OVERLAY_STYLES = `
+  canvas:focus,
+  canvas:focus-visible,
+  video:focus,
+  video:focus-visible {
+    outline: none !important;
+  }
+
+  #mz-player-text-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    pointer-events: none;
+    display: none;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  #mz-player-text-overlay.mz-player-text-overlay-active {
+    display: block;
+  }
+
+  .mz-player-text-overlay-entry {
+    position: fixed;
+    box-sizing: border-box;
+    display: block;
+    white-space: pre;
+    overflow: visible;
+    pointer-events: none;
+    user-select: text;
+    contain: layout style paint;
+    color: transparent;
+    text-shadow: none;
+    background: transparent;
+    border-radius: 2px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    line-height: 1;
+    letter-spacing: 0;
+    word-spacing: 0;
+    font-kerning: none;
+    font-variant-ligatures: none;
+    opacity: 1;
+  }
+
+  .mz-player-text-overlay-entry-dom {
+    white-space: pre-wrap;
+    overflow-wrap: normal;
+  }
+
+  .mz-player-text-overlay-entry-construct2 {
+    white-space: pre;
+    overflow: visible;
+  }
+
+  .mz-player-text-overlay-entry-construct2-line {
+    position: absolute;
+    display: block;
+    white-space: pre;
+    transform-origin: 0 0;
+    user-select: text;
+  }
+
+  .mz-player-text-overlay-entry-construct2-character {
+    position: absolute;
+    display: block;
+    top: 0;
+    white-space: pre;
+    transform-origin: 0 0;
+    font: inherit;
+    color: inherit;
+    text-shadow: inherit;
+  }
+
+  .mz-player-text-overlay-entry-cocos {
+    white-space: pre-wrap;
+    overflow: hidden;
+  }
+
+  .mz-player-text-overlay-entry-rpg-text {
+    position: absolute;
+    display: block;
+    box-sizing: border-box;
+    white-space: pre;
+    overflow: visible;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    color: inherit;
+    text-shadow: inherit;
+    user-select: text;
+  }
+
+  .mz-player-text-overlay-entry-rpg {
+    contain: layout style;
+  }
+
+  .mz-player-text-overlay-entry-rpg-segment {
+    position: absolute;
+    display: block;
+    top: 0;
+    white-space: pre;
+    font: inherit;
+    color: inherit;
+    text-shadow: inherit;
+  }
+
+  #mz-player-text-overlay.mz-player-text-overlay-readable
+    .mz-player-text-overlay-entry {
+    color: rgba(255, 255, 255, 0.96);
+    text-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.95),
+      0 0 3px rgba(0, 0, 0, 0.8);
+    background: transparent;
+  }
+
+  #mz-player-text-overlay.mz-player-text-overlay-reader
+    .mz-player-text-overlay-entry {
+    pointer-events: auto;
+    cursor: text;
+  }
+`;
+
+  // player-runtime/bridge/overlay/index.ts
+  function createTextOverlayBridge({ config, postParentMessage, settings }) {
+    const overlayState = createOverlayState();
+    const {
+      clearGuardState,
+      dictionaryGuardActive,
+      focusGameTarget,
+      installDictionaryGuardInputHooks,
+      installOverlayFocusReturn
+    } = createOverlayInputController({ overlayState, postParentMessage, settings });
+    const {
+      entryIsVisible,
+      ownerBelongsToScene,
+      refreshRpgMakerFontMetrics,
+      scheduleFlush
+    } = createOverlayRenderer({
+      cocosSourceIsVisible,
+      construct2SourceIsVisible,
+      construct2TextSegments,
+      domSourceIsVisible,
+      ensureOverlayDom,
+      overlayIsActive,
+      overlayState,
+      removeEntry,
+      scaledCssLength
+    });
+    const { install: installRpgMakerOverlayHooks } = createRpgMakerOverlay({
+      entryIsVisible,
+      overlayIsActive,
+      overlayState,
+      ownerBelongsToScene,
+      refreshRpgMakerFontMetrics,
+      removeEntry,
+      scheduleFlush,
+      upsertEntry
+    });
+    const { install: installCocosOverlayHooks } = createCocosOverlayAdapter({
+      domSourceId,
+      ensureOverlayDom,
+      overlayIsActive,
+      overlayState,
+      removeEntry,
+      scheduleFlush,
+      upsertEntry
+    });
+    const { install: installConstruct2OverlayHooks } = createConstruct2OverlayAdapter({
+      domSourceId,
+      overlayIsActive,
+      overlayState,
+      removeEntry,
+      upsertEntry
+    });
+    const {
+      install: installTyranoOverlayHooks,
+      scheduleScan: scheduleTyranoScan
+    } = createTyranoOverlayAdapter({
+      domSourceId,
+      overlayIsActive,
+      overlayState,
+      removeEntry,
+      scheduleFlush,
+      upsertEntry
+    });
+    function ensureOverlayDom() {
+      if (!overlayState.style) {
+        overlayState.style = document.createElement("style");
+        overlayState.style.textContent = OVERLAY_STYLES;
+        document.documentElement.appendChild(overlayState.style);
       }
-      const cssScaleX = canvasRect.width / (Number(canvasWidth) || canvasRect.width || 1);
-      const cssScaleY = canvasRect.height / (Number(canvasHeight) || canvasRect.height || 1);
-      const cssPoints = points.map((point) => ({
-        x: canvasRect.left + point.x * cssScaleX,
-        y: canvasRect.top + point.y * cssScaleY
-      }));
-      const left = Math.min(...cssPoints.map((point) => point.x));
-      const top = Math.min(...cssPoints.map((point) => point.y));
-      const right = Math.max(...cssPoints.map((point) => point.x));
-      const bottom = Math.max(...cssPoints.map((point) => point.y));
-      return {
-        left: roundCssPixel(left),
-        top: roundCssPixel(top),
-        width: roundCssPixel(Math.max(1, right - left)),
-        height: roundCssPixel(Math.max(1, bottom - top))
-      };
-    }
-    function transformPoint(matrix, x, y) {
-      return {
-        x: matrix.a * x + matrix.c * y + matrix.tx,
-        y: matrix.b * x + matrix.d * y + matrix.ty
-      };
-    }
-    function contentGeometry(entry) {
-      const owner = entry.owner;
-      const sprite = contentSpriteFor(owner, entry.bitmap);
-      if (sprite) {
-        const position = ownerWorldPosition(sprite);
-        const frame = spriteFrame(sprite);
-        const anchorX = Number(sprite.anchor?.x) || 0;
-        const anchorY = Number(sprite.anchor?.y) || 0;
-        return {
-          x: position.x - anchorX * frame.width,
-          y: position.y - anchorY * frame.height,
-          originX: frame.x,
-          originY: frame.y,
-          visibleWidth: frame.width,
-          visibleHeight: frame.height
-        };
+      if (!overlayState.root) {
+        overlayState.root = document.createElement("div");
+        overlayState.root.id = "mz-player-text-overlay";
+        document.documentElement.appendChild(overlayState.root);
+        installOverlayFocusReturn();
       }
-      const ownerPos = ownerWorldPosition(owner);
-      const padding = Number(owner.padding) || 0;
-      const originX = owner.origin ? Number(owner.origin.x) || 0 : 0;
-      const originY = owner.origin ? Number(owner.origin.y) || 0 : 0;
-      return {
-        x: ownerPos.x + padding,
-        y: ownerPos.y + padding,
-        originX,
-        originY,
-        visibleWidth: Math.max(0, (Number(owner.width) || Number(owner._width) || 0) - padding * 2),
-        visibleHeight: Math.max(0, (Number(owner.height) || Number(owner._height) || 0) - padding * 2)
-      };
     }
-    function contentSpriteFor(owner, bitmap) {
-      const candidates = [
-        owner && owner._windowContentsSprite,
-        owner && owner._contentsSprite
-      ];
-      const matching = candidates.find((sprite) => sprite && sprite.bitmap === bitmap);
-      return matching || findBitmapSprite(owner, bitmap) || candidates.find(Boolean) || null;
-    }
-    function findBitmapSprite(owner, bitmap) {
-      if (!owner || !bitmap) return null;
-      const queue = Array.isArray(owner.children) ? [...owner.children] : [];
-      const seen = /* @__PURE__ */ new Set();
-      while (queue.length && seen.size < 3e3) {
-        const current = queue.shift();
-        if (!current || seen.has(current)) continue;
-        seen.add(current);
-        if (current.bitmap === bitmap || current._bitmap === bitmap) return current;
-        if (Array.isArray(current.children)) queue.push(...current.children);
+    function refreshOverlayClasses() {
+      ensureOverlayDom();
+      const active = overlayIsActive();
+      overlayState.root.classList.toggle("mz-player-text-overlay-active", active);
+      overlayState.root.classList.toggle("mz-player-text-overlay-readable", settings.readableOverlay);
+      overlayState.root.classList.toggle("mz-player-text-overlay-reader", settings.readerMode);
+      if (!active) {
+        clearOverlayEntries();
+        clearGuardState();
       }
-      return null;
+      scheduleTyranoScan();
+      scheduleFlush();
     }
-    function spriteFrame(sprite) {
-      const frame = sprite && (sprite._frame || sprite._realFrame);
-      const width = Number(frame && frame.width) || Number(sprite.width) || 0;
-      const height = Number(frame && frame.height) || Number(sprite.height) || 0;
-      return {
-        x: Number(frame && frame.x) || 0,
-        y: Number(frame && frame.y) || 0,
-        width: Math.max(0, width),
-        height: Math.max(0, height)
-      };
+    function overlayIsActive() {
+      return settings.overlayEnabled || settings.readableOverlay || settings.readerMode;
     }
-    function roundCssPixel(value) {
-      return Math.round(value * 2) / 2;
-    }
-    function displayObjectIsVisible(object) {
-      let current = object;
-      let guard = 0;
-      while (current && guard++ < 30) {
-        if (current.visible === false || current.renderable === false || current.alpha === 0) return false;
-        current = current.parent;
+    function domSourceId(source) {
+      let id = overlayState.domSourceIds.get(source);
+      if (!id) {
+        id = overlayState.nextDomSourceId++;
+        overlayState.domSourceIds.set(source, id);
       }
-      return true;
+      return id;
     }
-    function rectsIntersect(a, b) {
-      return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+    function removeEntry(key, entry) {
+      if (entry) forgetLineGroupsForEntry(key);
+      if (entry.element) entry.element.remove();
+      overlayState.entries.delete(key);
     }
-    function intersectRects(a, b) {
-      const x1 = Math.max(a.x, b.x);
-      const y1 = Math.max(a.y, b.y);
-      const x2 = Math.min(a.x + a.width, b.x + b.width);
-      const y2 = Math.min(a.y + a.height, b.y + b.height);
-      if (x2 <= x1 || y2 <= y1) return null;
-      return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
-    }
-    function ownerWorldPosition(owner) {
-      let x = 0;
-      let y = 0;
-      let current = owner;
-      let guard = 0;
-      while (current && guard++ < 20) {
-        x += Number(current.x) || 0;
-        y += Number(current.y) || 0;
-        current = current.parent;
+    function forgetLineGroupsForEntry(entryKey) {
+      for (const [key, group] of overlayState.lineGroups) {
+        if (group.entryKey === entryKey) overlayState.lineGroups.delete(key);
       }
-      return { x, y };
     }
-    function hashText(text) {
-      let hash = 0;
-      for (let i = 0; i < text.length; i++) {
-        hash = (hash << 5) - hash + text.charCodeAt(i) | 0;
-      }
-      return (hash >>> 0).toString(36);
+    function clearOverlayEntries() {
+      if (overlayState.root) overlayState.root.replaceChildren();
+      overlayState.entries.clear();
+      overlayState.lineGroups.clear();
+      for (const timer of overlayState.textLogTimers.values()) window.clearTimeout(timer);
+      overlayState.textLogTimers.clear();
+      overlayState.textLogValues.clear();
+      overlayState.raf = 0;
+    }
+    function upsertEntry(key, next) {
+      const current = overlayState.entries.get(key) || {};
+      const textChanged = current.text !== next.text;
+      Object.assign(current, next);
+      overlayState.entries.set(key, current);
+      if (textChanged) scheduleTextLog(key, current);
+      scheduleFlush();
+    }
+    function scheduleTextLog(key, entry) {
+      if (!entryIsLoggable(entry)) return;
+      const text = String(entry.text || "");
+      const dedupeKey = textLogDedupeKey(text);
+      if (!dedupeKey) return;
+      replaceTextLogTimer(key, () => {
+        overlayState.textLogTimers.delete(key);
+        if (overlayState.textLogValues.get(key) === dedupeKey) return;
+        overlayState.textLogValues.set(key, dedupeKey);
+        postParentMessage({ type: "text-log", gameId: config.gameId, text, at: Date.now() });
+      });
+    }
+    function replaceTextLogTimer(key, callback) {
+      const existing = overlayState.textLogTimers.get(key);
+      if (existing) window.clearTimeout(existing);
+      const timer = window.setTimeout(callback, TEXT_LOG_DELAY_MS);
+      overlayState.textLogTimers.set(key, timer);
+    }
+    function entryIsLoggable(entry) {
+      if (entry?.domSource || entry?.constructSource || entry?.cocosSource) return true;
+      const name = entry?.owner?.constructor?.name || "";
+      return /^(Window_Message|Window_ChoiceList|Window_NameBox|Window_ScrollText)$/.test(name);
     }
     return {
       clearGuardState,
@@ -2741,6 +2962,16 @@
       refreshOverlayClasses,
       scheduleFlush
     };
+  }
+
+  // shared/browser.ts
+  function frameElementRect() {
+    try {
+      const rect = window.frameElement?.getBoundingClientRect?.();
+      if (rect && rect.width > 0 && rect.height > 0) return rect;
+    } catch {
+    }
+    return null;
   }
 
   // player-runtime/bridge/viewport.ts
@@ -2785,16 +3016,8 @@
       latestPlayerViewport = { width, height };
       scheduleViewportFit();
     }
-    function playerFrameRect() {
-      try {
-        const rect = window.frameElement?.getBoundingClientRect?.();
-        if (rect && rect.width > 0 && rect.height > 0) return rect;
-      } catch {
-      }
-      return null;
-    }
     function playerViewport() {
-      const rect = playerFrameRect();
+      const rect = frameElementRect();
       return {
         width: rect?.width || latestPlayerViewport?.width || window.innerWidth || document.documentElement.clientWidth,
         height: rect?.height || latestPlayerViewport?.height || window.innerHeight || document.documentElement.clientHeight
@@ -2921,7 +3144,45 @@
     };
   }
 
-  // player-runtime/bridge/encryptionFallback.ts
+  // shared/binary.ts
+  function bytesToHex(bytes) {
+    let output = "";
+    for (const byte of bytes) {
+      output += byte.toString(16).padStart(2, "0");
+    }
+    return output;
+  }
+  function bytesFromBuffer(value) {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  function imageMimeType(value) {
+    if (!value) return void 0;
+    const bytes = bytesFromBuffer(value);
+    if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) {
+      return "image/png";
+    }
+    if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
+      return "image/jpeg";
+    }
+    if (bytes.length >= 4 && bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56) {
+      return "image/gif";
+    }
+    if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) {
+      return "image/webp";
+    }
+    return void 0;
+  }
+
+  // shared/blob.ts
+  function createArrayBufferObjectUrl(arrayBuffer, mimeType, fallback) {
+    if (mimeType && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      return URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
+    }
+    return fallback();
+  }
+
+  // player-runtime/engines/rpgmaker_mvmz/encryption.ts
   var RPG_MAKER_HEADER_HEX = "5250474d560000000003010000000000";
   var ENCRYPTION_FALLBACK_INSTALL_INTERVAL_MS = 10;
   var MAX_ENCRYPTION_FALLBACK_INSTALL_ATTEMPTS = 500;
@@ -2943,21 +3204,11 @@
     68,
     82
   ]);
-  var JPEG_HEADER_BYTES = new Uint8Array([255, 216, 255]);
-  var GIF87A_HEADER_BYTES = new Uint8Array([71, 73, 70, 56, 55, 97]);
-  var GIF89A_HEADER_BYTES = new Uint8Array([71, 73, 70, 56, 57, 97]);
-  var WEBP_RIFF_HEADER_BYTES = new Uint8Array([82, 73, 70, 70]);
-  var WEBP_WEBP_HEADER_BYTES = new Uint8Array([87, 69, 66, 80]);
   var OGG_HEADER_BYTES = new Uint8Array([79, 103, 103, 83]);
   var RIFF_HEADER_BYTES = new Uint8Array([82, 73, 70, 70]);
   var WAVE_HEADER_BYTES = new Uint8Array([87, 65, 86, 69]);
   var ID3_HEADER_BYTES = new Uint8Array([73, 68, 51]);
   var MP4_FTYP_HEADER_BYTES = new Uint8Array([102, 116, 121, 112]);
-  function bytesToHex(bytes) {
-    let output = "";
-    for (const byte of bytes) output += byte.toString(16).padStart(2, "0");
-    return output;
-  }
   function startsWithBytes(bytes, expected) {
     if (!bytes || bytes.byteLength < expected.byteLength) return false;
     for (let index = 0; index < expected.byteLength; index += 1) {
@@ -2969,21 +3220,8 @@
     if (!bytes || bytes.byteLength < 32) return false;
     return bytesToHex(bytes.slice(0, 16)) === RPG_MAKER_HEADER_HEX;
   }
-  function imageMimeTypeForArrayBuffer(arrayBuffer) {
-    if (!arrayBuffer) return void 0;
-    const bytes = new Uint8Array(arrayBuffer);
-    if (startsWithBytes(bytes, PNG_HEADER_BYTES)) return "image/png";
-    if (startsWithBytes(bytes, JPEG_HEADER_BYTES)) return "image/jpeg";
-    if (startsWithBytes(bytes, GIF87A_HEADER_BYTES) || startsWithBytes(bytes, GIF89A_HEADER_BYTES)) {
-      return "image/gif";
-    }
-    if (bytes.byteLength >= 12 && startsWithBytes(bytes, WEBP_RIFF_HEADER_BYTES) && startsWithBytes(bytes.slice(8, 12), WEBP_WEBP_HEADER_BYTES)) {
-      return "image/webp";
-    }
-    return void 0;
-  }
   function isImageArrayBuffer(arrayBuffer) {
-    return Boolean(imageMimeTypeForArrayBuffer(arrayBuffer));
+    return Boolean(imageMimeType(arrayBuffer));
   }
   function isAudioArrayBuffer(arrayBuffer) {
     if (!arrayBuffer) return false;
@@ -3012,21 +3250,22 @@
     return body.buffer;
   }
   function createImageBlobUrl(arrayBuffer) {
-    const mimeType = imageMimeTypeForArrayBuffer(arrayBuffer);
-    if (mimeType && typeof Blob !== "undefined" && window.URL && typeof window.URL.createObjectURL === "function") {
-      return window.URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
-    }
-    return Decrypter.createBlobUrl(arrayBuffer);
+    const mimeType = imageMimeType(arrayBuffer);
+    return createArrayBufferObjectUrl(
+      arrayBuffer,
+      mimeType,
+      () => Decrypter.createBlobUrl(arrayBuffer)
+    );
   }
   function decryptImageArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {
-    if (imageMimeTypeForArrayBuffer(arrayBuffer)) return arrayBuffer;
+    if (imageMimeType(arrayBuffer)) return arrayBuffer;
     let defaultResult;
     try {
       defaultResult = defaultDecrypt(arrayBuffer);
     } catch (error) {
       defaultResult = void 0;
     }
-    if (imageMimeTypeForArrayBuffer(defaultResult)) return defaultResult;
+    if (imageMimeType(defaultResult)) return defaultResult;
     return repairRpgMakerEncryptedPng(arrayBuffer, defaultResult);
   }
   function decryptMediaArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {

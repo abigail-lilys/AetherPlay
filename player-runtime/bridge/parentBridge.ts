@@ -1,6 +1,6 @@
 // @ts-nocheck
 
-import { keyEventMatchesChord } from "./keyEvents";
+import { keyEventMatchesChord } from "@/player-runtime/bridge/keyEvents";
 
 export function postParent(message) {
   try {

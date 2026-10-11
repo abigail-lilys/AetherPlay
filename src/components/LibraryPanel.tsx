@@ -1,14 +1,14 @@
 import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
-import { formatBytes } from "../lib/format";
+import { formatBytes } from "@/src/lib/format";
 import type {
   DictionaryDismissGuard,
   GameRecord,
   ImportProgress,
-} from "../lib/types";
-import { DictionaryGuardPanel } from "./DictionaryGuardPanel";
-import { GameCard } from "./GameCard";
-import { Icon } from "./Icon";
-import { ImportProgressCard } from "./ImportProgressCard";
+} from "@/src/lib/types";
+import { DictionaryGuardPanel } from "@/src/components/DictionaryGuardPanel";
+import { GameCard } from "@/src/components/GameCard";
+import { Icon } from "@/src/components/Icon";
+import { ImportProgressCard } from "@/src/components/ImportProgressCard";
 
 interface LibraryPanelProps {
   activeGame?: GameRecord;

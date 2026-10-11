@@ -23,9 +23,9 @@ type WolfRuntimeModule = {
   canvas?: HTMLCanvasElement;
 };
 
-import { normalizeWolfPath, wolfPathKeys } from "./wolfPaths";
-import { installWolfCompatibility } from "./wolfCompatibility";
-import type { WolfPlayerSettings } from "./wolfCompatibility";
+import { normalizeWolfPath, wolfPathKeys } from "@/player-runtime/engines/wolf/path";
+import { installWolfCompatibility } from "@/player-runtime/engines/wolf/compatibility";
+import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibility";
 
 declare const Module: WolfRuntimeModule;
 declare const FS: {

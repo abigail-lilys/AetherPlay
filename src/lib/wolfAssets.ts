@@ -1,15 +1,15 @@
-import { getSessionFolderFile } from "./sessionFiles";
+import { getSessionFolderFile } from "@/src/lib/sessionFiles";
 import {
   getIndexedDbBlobs,
   getLocalFolderHandle,
   getOpfsBlob,
   getStoredFilesForGame,
   type BrowserFileSystemDirectoryHandle,
-} from "./storage";
-import { normalizeStoredPath } from "./paths";
-import type { StoredGameFile } from "./types";
+} from "@/src/lib/storage";
+import { normalizeStoredPath } from "@/src/lib/paths";
+import type { StoredGameFile } from "@/src/lib/types";
 
-export type WolfAssetObjectUrl = {
+type WolfAssetObjectUrl = {
   path: string;
   url: string;
   size: number;

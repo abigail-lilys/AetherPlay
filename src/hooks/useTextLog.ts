@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { appendTextLog } from "../lib/textLog";
+import { appendTextLog } from "@/src/lib/textLog";
 
 export function useTextLog(limit: number) {
   const [textLogs, setTextLogs] = useState<string[]>([]);

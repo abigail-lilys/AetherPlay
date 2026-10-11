@@ -1,6 +1,6 @@
-import { formatBytes } from "../lib/format";
-import type { GameRecord } from "../lib/types";
-import { Icon } from "./Icon";
+import { formatBytes } from "@/src/lib/format";
+import type { GameRecord } from "@/src/lib/types";
+import { Icon } from "@/src/components/Icon";
 
 interface GameCardProps {
   active: boolean;

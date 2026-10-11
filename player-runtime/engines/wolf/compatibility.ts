@@ -1,3 +1,5 @@
+import { exactModifierMatch } from "@/shared/keyInput";
+
 export type WolfPlayerSettings = {
   reservedKeys?: Array<{
     code: string;
@@ -24,18 +26,6 @@ function normalizeSettings(next: WolfPlayerSettings | undefined) {
   return {
     reservedKeys: Array.isArray(next?.reservedKeys) ? next.reservedKeys : [],
   };
-}
-
-function exactModifiers(event: KeyboardEvent, chord: {
-  altKey?: boolean;
-  ctrlKey?: boolean;
-  metaKey?: boolean;
-  shiftKey?: boolean;
-}) {
-  return event.altKey === Boolean(chord.altKey)
-    && event.ctrlKey === Boolean(chord.ctrlKey)
-    && event.metaKey === Boolean(chord.metaKey)
-    && event.shiftKey === Boolean(chord.shiftKey);
 }
 
 export function installWolfCompatibility(options: WolfCompatibilityOptions) {
@@ -186,7 +176,7 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
   function handleReservedKey(event: KeyboardEvent) {
     if (event.type !== "keydown") return;
     const key = settings.reservedKeys.find(
-      (item) => item.code === event.code && exactModifiers(event, item),
+      (item) => item.code === event.code && exactModifierMatch(event, item),
     );
     if (!key || key.action === "toggleOverlay" || key.action === "toggleReader") return;
     event.preventDefault();

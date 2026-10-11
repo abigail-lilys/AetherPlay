@@ -1,13 +1,8 @@
 // @ts-nocheck
 
-export function exactModifierMatch(event, trigger) {
-  return (
-    Boolean(event.altKey) === Boolean(trigger.altKey) &&
-    Boolean(event.ctrlKey) === Boolean(trigger.ctrlKey) &&
-    Boolean(event.metaKey) === Boolean(trigger.metaKey) &&
-    Boolean(event.shiftKey) === Boolean(trigger.shiftKey)
-  );
-}
+import { exactModifierMatch } from "@/shared/keyInput";
+
+export { exactModifierMatch };
 
 export function keyEventMatchesChord(event, chord) {
   return (

@@ -24,7 +24,7 @@ const nodeBrowserAliasPlugin = {
   },
 };
 
-async function buildRuntime(entryName) {
+async function buildRuntime(entryName, entryPath = entryName) {
   await build({
     banner: {
       js: [
@@ -39,10 +39,13 @@ async function buildRuntime(entryName) {
       ].join("\n"),
     },
     bundle: true,
+    alias: {
+      "@": root,
+    },
     define: {
       global: "globalThis",
     },
-    entryPoints: [resolve(root, "player-runtime", entryName + ".ts")],
+    entryPoints: [resolve(root, "player-runtime", entryPath + ".ts")],
     format: "iife",
     inject: [resolve(root, "player-runtime/node-globals.ts")],
     logLevel: "info",
@@ -60,6 +63,9 @@ async function buildRuntimeBridge() {
       js: "/* Generated from player-runtime/bridge/*.ts by scripts/build-player-runtime.mjs. */",
     },
     bundle: true,
+    alias: {
+      "@": root,
+    },
     entryPoints: [resolve(root, "player-runtime/bridge/index.ts")],
     format: "iife",
     logLevel: "info",
@@ -73,5 +79,5 @@ async function buildRuntimeBridge() {
 await mkdir(outdir, { recursive: true });
 await buildRuntime("buffer");
 await buildRuntime("desktop");
-await buildRuntime("wolf");
+await buildRuntime("wolf", "engines/wolf/index");
 await buildRuntimeBridge();

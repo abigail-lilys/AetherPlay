@@ -20,6 +20,19 @@ It can also help with language study. The text overlay makes game text easier to
 select with browser tools such as the Yomitan extension. Yomitan is a separate
 project and is not included with this app.
 
+## Feature Support
+
+| Engine          | Compatible input                                                                            | Overlay                                | Text log                                              | Save backup                                                | Engine-specific support                                                         |
+| --------------- | ------------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| RPG Maker MV/MZ | Web export or extracted NW.js game, as a folder or ZIP                                      | Yes, for canvas text                   | Yes, for messages, choices, names, and scrolling text | Yes, for browser saves and emulated desktop save files     | Standard encrypted image/audio assets and common NW.js/Node APIs                |
+| WOLF RPG        | `wolftools` web export containing `index.html`, `asset_manifest.json`, and extracted assets | No                                     | No                                                    | No player-managed save ZIP                                 | Browser Woditor playback, lazy asset loading, canvas sizing, and input handling |
+| TyranoScript    | Web export or extracted desktop game, as a folder or ZIP                                    | Yes, for HTML dialogue and choices     | Yes                                                   | Yes, when saves use browser storage                        | Desktop file-save configuration is redirected to browser storage                |
+| Construct 2     | Web export or extracted `package.nw`, as a folder or ZIP                                    | Yes, for Text and SpriteFont objects   | Yes                                                   | Yes, when saves use browser or emulated filesystem storage | Common NW.js/Node APIs                                                          |
+| Cocos Creator   | Web export or extracted Electron app, as a folder or ZIP                                    | Yes, for Label and RichText components | Yes                                                   | Yes, when saves use browser or emulated filesystem storage | Common Electron/Node APIs                                                       |
+
+Compatibility can still vary when a game or plugin relies
+on an API that the browser player does not emulate.
+
 ## App Flow
 
 1. Open the app in your browser.
@@ -111,8 +124,10 @@ file saves.
 ## Extracting Packaged Desktop Games
 
 Extraction does not guarantee browser compatibility. Games that depend on
-unsupported Electron or Node.js APIs may still fail. Encrypted or DRM-protected
-packages are also not supported.
+unsupported Electron or Node.js APIs may still fail. Password-encrypted archives
+and DRM-protected packages are not supported. Standard RPG Maker MV/MZ encrypted
+image and audio assets are supported when the export includes a usable
+encryption key.
 
 ### NW.js games packaged as `package.nw`
 

@@ -1,10 +1,19 @@
 // @ts-nocheck
 
+import { bytesToHex } from "@/shared/binary";
+import {
+  VFS_BINARY_PREFIX,
+  VFS_DIR_PREFIX,
+  VFS_FILE_PREFIX,
+  VFS_META_PREFIX,
+} from "@/shared/virtualFileSystem";
+import { createRpgMakerSaveRuntime } from "@/player-runtime/engines/rpgmaker_mvmz/save";
+import { createFsFacade } from "@/player-runtime/desktop/fsFacade";
+
 export function createFsRuntime(options) {
   const {
     BrowserBuffer,
     bytesToBase64,
-    bytesToHex,
     config,
     enhancedBytes,
     pathRuntime,
@@ -19,11 +28,13 @@ export function createFsRuntime(options) {
     trimTrailingSlash,
   } = pathRuntime;
 
-  const VFS_FILE_PREFIX = "__mz_player_desktop_fs:file:";
-  const VFS_DIR_PREFIX = "__mz_player_desktop_fs:dir:";
-  const VFS_BINARY_PREFIX = "__mz_player_desktop_fs:base64:";
-  const VFS_META_PREFIX = "__mz_player_desktop_fs:meta:";
-  const SAVE_CHANGED_EVENT = "MZ_PLAYER_LOCAL_SAVE_CHANGED";
+  const {
+    browserRpgSaveFileNameForKey,
+    browserRpgSaveKeyForPath,
+    dispatchSaveChanged,
+    isBrowserRpgSaveDirectory,
+    saveChangedEvent: SAVE_CHANGED_EVENT,
+  } = createRpgMakerSaveRuntime({ fileKey, vfsPathAliases });
   const manifestTextCache = new Map();
   const manifestBytesCache = new Map();
   const openFiles = new Map();
@@ -94,70 +105,6 @@ export function createFsRuntime(options) {
       isDirectory,
       mtimeMs: now,
     }));
-  }
-
-  function browserRpgSaveKeyForPath(path) {
-    for (const alias of vfsPathAliases(path)) {
-      const key = alias.replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
-      const saveDirectoryFile = /^(?:www\/)?save\/(.+)$/u.exec(key);
-      if (saveDirectoryFile) {
-        const relativePath = saveDirectoryFile[1];
-        const filename = relativePath.split("/").at(-1) || relativePath;
-        const slot = /^file(\d+)(?:[._-].*)?$/u.exec(filename);
-        if (slot) return "RPG File" + slot[1] + (filename.endsWith(".bak") ? "bak" : "");
-        const special = /^(config|global|shared)(?:[._-].*)?$/u.exec(filename);
-        if (special) {
-          return "RPG " + special[1][0].toUpperCase() + special[1].slice(1);
-        }
-        return "RPG Save " + relativePath;
-      }
-      const flatFile = /^(?:www\/)?([^/]+)$/u.exec(key)?.[1];
-      if (!flatFile) continue;
-      const flatSlot = /^(?:save)?file(\d+)(?:[._-].*)?$/u.exec(flatFile);
-      if (flatSlot) {
-        return "RPG File" + flatSlot[1] + (flatFile.endsWith(".bak") ? "bak" : "");
-      }
-      const flatSpecial = /^save(config|global|shared)(?:[._-].*)?$/u.exec(flatFile);
-      if (flatSpecial) {
-        return "RPG " + flatSpecial[1][0].toUpperCase() + flatSpecial[1].slice(1);
-      }
-      if (flatFile.startsWith("save")) return "RPG Save " + flatFile;
-    }
-    return null;
-  }
-
-  function browserRpgSaveFileNameForKey(key) {
-    if (key === "RPG Config") return "config.rpgsave";
-    if (key === "RPG Global") return "global.rpgsave";
-    if (key === "RPG Shared") return "shared.rmmzsave";
-    const match = /^RPG File(\d+)(bak)?$/u.exec(String(key));
-    if (!match) return null;
-    return "file" + match[1] + ".rpgsave" + (match[2] ? ".bak" : "");
-  }
-
-  function saveChangeDetail(operation, path) {
-    const saveKey = browserRpgSaveKeyForPath(path);
-    if (!saveKey) return null;
-    return {
-      operation,
-      path: String(path),
-      rawKey: fileKey(path),
-      reason: operation + " " + saveKey,
-      storageKey: saveKey,
-    };
-  }
-
-  function dispatchSaveChanged(operation, path) {
-    const detail = saveChangeDetail(operation, path);
-    if (!detail) return;
-    window.dispatchEvent(new CustomEvent(SAVE_CHANGED_EVENT, { detail }));
-  }
-
-  function isBrowserRpgSaveDirectory(path) {
-    return vfsPathAliases(path).some((alias) => {
-      const key = alias.replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
-      return key === "save" || key === "www/save";
-    });
   }
 
   function fsError(code, syscall, path, dest) {
@@ -819,348 +766,35 @@ export function createFsRuntime(options) {
       : readFileBytes(path);
   }
 
-  function nodeCallback(callback, error, value) {
-    const run = () => callback(error, value);
-    if (typeof queueMicrotask === "function") {
-      queueMicrotask(run);
-    } else {
-      Promise.resolve().then(run);
-    }
-  }
-
-  function nodeCallbackArgs(callback, args) {
-    const run = () => callback.apply(null, args);
-    if (typeof queueMicrotask === "function") queueMicrotask(run);
-    else Promise.resolve().then(run);
-  }
-
-  function requireCallback(callback) {
-    if (typeof callback !== "function") {
-      throw new TypeError("callback must be a function.");
-    }
-  }
-
-  function withOptionalCallback(operation, callback) {
-    if (callback === undefined) return operation();
-    requireCallback(callback);
-    try {
-      const result = operation();
-      nodeCallback(callback, null, result);
-    } catch (error) {
-      nodeCallback(callback, error);
-    }
-    return undefined;
-  }
-
-  function promiseFromSync(operation) {
-    return new Promise((resolve, reject) => {
-      try {
-        resolve(operation());
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  function readFileCallback(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    if (callback === undefined) return readFileCore(path, options);
-    requireCallback(callback);
-    readFileCore(path, options).then(
-      (value) => nodeCallback(callback, null, value),
-      (error) => nodeCallback(callback, error),
-    );
-    return undefined;
-  }
-
-  function appendFile(path, data, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    return withOptionalCallback(() => appendFileSync(path, data, options), callback);
-  }
-
-  function writeFile(path, data, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    return withOptionalCallback(() => writeFileSync(path, data, options), callback);
-  }
-
-  function rename(oldPath, newPath, callback) {
-    return withOptionalCallback(() => renameSync(oldPath, newPath), callback);
-  }
-
-  function copyFile(source, target, mode, callback) {
-    if (typeof mode === "function") {
-      callback = mode;
-      mode = undefined;
-    }
-    void mode;
-    return withOptionalCallback(() => copyFileSync(source, target), callback);
-  }
-
-  function unlink(path, callback) {
-    return withOptionalCallback(() => unlinkSync(path), callback);
-  }
-
-  function rm(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    return withOptionalCallback(() => rmSync(path, options), callback);
-  }
-
-  function mkdir(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    return withOptionalCallback(() => mkdirSync(path, options), callback);
-  }
-
-  function readdir(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    return withOptionalCallback(() => readdirSync(path, options), callback);
-  }
-
-  function stat(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    void options;
-    return withOptionalCallback(() => makeStats(path), callback);
-  }
-
-  function lstat(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    void options;
-    return withOptionalCallback(() => makeStats(path), callback);
-  }
-
-  function access(path, mode, callback) {
-    if (typeof mode === "function") {
-      callback = mode;
-      mode = undefined;
-    }
-    void mode;
-    return withOptionalCallback(() => accessSync(path), callback);
-  }
-
-  function exists(path, callback) {
-    requireCallback(callback);
-    const result = existsSync(path);
-    if (typeof queueMicrotask === "function") queueMicrotask(() => callback(result));
-    else Promise.resolve().then(() => callback(result));
-  }
-
-  function realpath(path, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    void options;
-    return withOptionalCallback(() => realpathSync(path), callback);
-  }
-
-  function truncate(path, length, callback) {
-    if (typeof length === "function") {
-      callback = length;
-      length = 0;
-    }
-    return withOptionalCallback(() => truncateSync(path, length), callback);
-  }
-
-  function open(path, flags, mode, callback) {
-    if (typeof mode === "function") {
-      callback = mode;
-      mode = undefined;
-    }
-    void mode;
-    return withOptionalCallback(() => openSync(path, flags), callback);
-  }
-
-  function close(fd, callback) {
-    return withOptionalCallback(() => closeSync(fd), callback);
-  }
-
-  function fstat(fd, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = undefined;
-    }
-    void options;
-    return withOptionalCallback(() => fstatSync(fd), callback);
-  }
-
-  function ftruncate(fd, length, callback) {
-    if (typeof length === "function") {
-      callback = length;
-      length = 0;
-    }
-    return withOptionalCallback(() => ftruncateSync(fd, length), callback);
-  }
-
-  function read(fd, buffer, offset, length, position, callback) {
-    requireCallback(callback);
-    try {
-      const bytesRead = readSync(fd, buffer, offset, length, position);
-      nodeCallbackArgs(callback, [null, bytesRead, buffer]);
-    } catch (error) {
-      nodeCallback(callback, error);
-    }
-  }
-
-  function write(fd, data, offset, length, position, callback) {
-    if (typeof data === "string") {
-      if (typeof length === "function") {
-        callback = length;
-        length = undefined;
-      } else if (typeof position === "function") {
-        callback = position;
-        position = undefined;
-      }
-    }
-    requireCallback(callback);
-    try {
-      const bytesWritten = writeSync(fd, data, offset, length, position);
-      nodeCallbackArgs(callback, [null, bytesWritten, data]);
-    } catch (error) {
-      nodeCallback(callback, error);
-    }
-  }
-
-  realpath.native = realpath;
-  realpathSync.native = realpathSync;
-
-  const fsPromises = {
-    readFile: readFileCore,
-    writeFile: (path, data, options) => promiseFromSync(() => writeFileSync(path, data, options)),
-    appendFile: (path, data, options) => promiseFromSync(() => appendFileSync(path, data, options)),
-    rename: (oldPath, newPath) => promiseFromSync(() => renameSync(oldPath, newPath)),
-    copyFile: (source, target, mode) => {
-      void mode;
-      return promiseFromSync(() => copyFileSync(source, target));
-    },
-    unlink: (path) => promiseFromSync(() => unlinkSync(path)),
-    rm: (path, options) => promiseFromSync(() => rmSync(path, options)),
-    mkdir: (path, options) => promiseFromSync(() => mkdirSync(path, options)),
-    readdir: (path, options) => promiseFromSync(() => readdirSync(path, options)),
-    stat: (path, options) => {
-      void options;
-      return promiseFromSync(() => makeStats(path));
-    },
-    lstat: (path, options) => {
-      void options;
-      return promiseFromSync(() => makeStats(path));
-    },
-    access: (path, mode) => {
-      void mode;
-      return promiseFromSync(() => accessSync(path));
-    },
-    realpath: (path, options) => {
-      void options;
-      return promiseFromSync(() => realpathSync(path));
-    },
-    truncate: (path, length) => promiseFromSync(() => truncateSync(path, length)),
-    open: (path, flags, mode) => {
-      void mode;
-      return promiseFromSync(() => {
-        const fd = openSync(path, flags);
-        return {
-          fd,
-          close: () => promiseFromSync(() => closeSync(fd)),
-          read: (buffer, offset, length, position) => promiseFromSync(() => ({
-            buffer,
-            bytesRead: readSync(fd, buffer, offset, length, position),
-          })),
-          readFile: (options) => promiseFromSync(() => readFileSync(fileForDescriptor(fd, "readFile").path, options)),
-          stat: () => promiseFromSync(() => fstatSync(fd)),
-          truncate: (length) => promiseFromSync(() => ftruncateSync(fd, length)),
-          write: (data, offset, length, position) => promiseFromSync(() => ({
-            buffer: data,
-            bytesWritten: writeSync(fd, data, offset, length, position),
-          })),
-          writeFile: (data, options) => promiseFromSync(() => writeFileSync(fileForDescriptor(fd, "writeFile").path, data, options)),
-        };
-      });
-    },
-  };
-
-  const fsConstants = Object.freeze({
-    F_OK: 0,
-    R_OK: 4,
-    W_OK: 2,
-    X_OK: 1,
-    COPYFILE_EXCL: 1,
-    COPYFILE_FICLONE: 2,
-    COPYFILE_FICLONE_FORCE: 4,
-  });
-
-  const fsModule = {
-    constants: fsConstants,
-    existsSync,
-    exists,
-    access,
+  const { fsModule } = createFsFacade({
     accessSync,
     appendFileSync,
-    appendFile,
-    close,
     closeSync,
-    copyFile,
     copyFileSync,
-    lstat,
-    fstat,
+    existsSync,
+    fileForDescriptor,
     fstatSync,
-    ftruncate,
     ftruncateSync,
+    makeStats,
     mkdirSync,
-    mkdir,
-    promises: fsPromises,
-    readFile: readFileCallback,
-    readFileText,
+    openSync,
     readFileBytes,
+    readFileCore,
     readFileSync,
-    read,
+    readFileText,
     readSync,
+    readdirSync,
     readlinkSync,
-    readdir,
-    realpath,
     realpathSync,
-    rename,
     renameSync,
-    rm,
-    writeFileSync,
-    writeFile,
-    write,
-    unlinkSync,
-    unlink,
     rmSync,
     rmdirSync,
-    readdirSync,
-    stat,
-    statSync: makeStats,
-    lstatSync: makeStats,
     symlinkSync,
-    open,
-    openSync,
-    truncate,
     truncateSync,
+    unlinkSync,
+    writeFileSync,
     writeSync,
-  };
+  });
 
 
   return {
