@@ -664,16 +664,6 @@ progress::-moz-progress-bar {
   color: var(--text-primary);
 }
 
-.home-control-cell-empty {
-  border-color: transparent;
-  background: transparent;
-}
-
-.home-control-cell-empty::before {
-  content: "";
-  display: block;
-}
-
 .home-guide-note {
   gap: 7px;
 }

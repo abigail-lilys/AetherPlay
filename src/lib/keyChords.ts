@@ -1,4 +1,4 @@
-import type { KeyChord } from "./types";
+import type { KeyChord } from "@/src/lib/types";
 
 export function chordFromEvent(
   event: Pick<KeyboardEvent, "code" | "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">,

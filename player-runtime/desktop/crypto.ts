@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { bytesToHex } from "@/shared/binary";
+import { scheduleMicrotask } from "@/shared/browser";
 
 export function createCryptoRuntime(options) {
   const { browserCryptoModule, enhancedBytes } = options;
@@ -39,21 +41,9 @@ export function createCryptoRuntime(options) {
     return bytes;
   }
 
-  function bytesToHex(bytes) {
-    let output = "";
-    for (const byte of bytes) {
-      output += byte.toString(16).padStart(2, "0");
-    }
-    return output;
-  }
-
   function deferCallback(callback, error, value) {
     const run = () => callback(error, value);
-    if (typeof queueMicrotask === "function") {
-      queueMicrotask(run);
-    } else {
-      Promise.resolve().then(run);
-    }
+    scheduleMicrotask(run);
   }
 
   function randomBytes(size, callback) {

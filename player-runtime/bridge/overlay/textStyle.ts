@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { cssTransformFromTopLeftPoints } from "@/player-runtime/bridge/overlay/geometry";
 
 const EMOJI_FONT_FALLBACK =
   '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
@@ -40,6 +41,19 @@ export function fontFamilyWithEmojiFallback(value) {
   );
   if (genericIndex < 0) withoutEmoji.push("sans-serif");
   return withoutEmoji.join(", ") || EMOJI_FONT_FALLBACK;
+}
+
+export function canvasFontSize(context, bitmap, owner) {
+  const match = String(context?.font || "").match(/(\d+(?:\.\d+)?)px/);
+  const parsed = match ? Number(match[1]) : 0;
+  return parsed || bitmap?.fontSize || owner?.standardFontSize?.() || 24;
+}
+
+export function canvasFontFace(context) {
+  const font = String(context?.font || "").trim();
+  if (!font) return "";
+  const match = font.match(/\d+(?:\.\d+)?px(?:\/[^\s]+)?\s+(.+)$/);
+  return match ? match[1] : "";
 }
 
 export function canvasFontTraits(context, bitmap) {
@@ -147,27 +161,5 @@ export function cssTransformFromTopLeftCanvasQuad(
     x: canvasRect.left + Number(point?.x) * scaleX,
     y: canvasRect.top + Number(point?.y) * scaleY,
   }));
-  if (cssPoints.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
-    return null;
-  }
-
-  const [topLeft, topRight, , bottomLeft] = cssPoints;
-  return {
-    left: topLeft.x,
-    top: topLeft.y,
-    width,
-    height,
-    matrix: {
-      a: (topRight.x - topLeft.x) / width,
-      b: (topRight.y - topLeft.y) / width,
-      c: (bottomLeft.x - topLeft.x) / height,
-      d: (bottomLeft.y - topLeft.y) / height,
-    },
-    bounds: {
-      left: Math.min(...cssPoints.map((point) => point.x)),
-      top: Math.min(...cssPoints.map((point) => point.y)),
-      right: Math.max(...cssPoints.map((point) => point.x)),
-      bottom: Math.max(...cssPoints.map((point) => point.y)),
-    },
-  };
+  return cssTransformFromTopLeftPoints(cssPoints, width, height);
 }

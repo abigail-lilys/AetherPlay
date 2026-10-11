@@ -1,4 +1,5 @@
-import type { DictionaryDismissGuard, GameRecord, KeyChord, PlayerSettings, ReservedKey } from "./types";
+import type { DictionaryDismissGuard, GameRecord, KeyChord, PlayerSettings, ReservedKey } from "@/src/lib/types";
+import { normalizeKeyChord } from "@/shared/keyInput";
 
 export const defaultDictionaryDismissGuard: DictionaryDismissGuard = {
   enabled: true,
@@ -26,19 +27,7 @@ export const defaultReservedKeys: ReservedKey[] = [
   },
 ];
 
-function normalizeKeyChord(chord: Partial<KeyChord> | undefined): KeyChord | null {
-  if (!chord || typeof chord !== "object") return null;
-  return {
-    code: typeof chord.code === "string" && chord.code ? chord.code : undefined,
-    altKey: Boolean(chord.altKey),
-    ctrlKey: Boolean(chord.ctrlKey),
-    metaKey: Boolean(chord.metaKey),
-    shiftKey: Boolean(chord.shiftKey),
-    label: typeof chord.label === "string" && chord.label ? chord.label : "Key",
-  };
-}
-
-export function normalizeDictionaryDismissGuard(guard: Partial<DictionaryDismissGuard> | undefined): DictionaryDismissGuard {
+function normalizeDictionaryDismissGuard(guard: Partial<DictionaryDismissGuard> | undefined): DictionaryDismissGuard {
   const triggers = Array.isArray(guard?.triggers) ? guard.triggers.map(normalizeKeyChord).filter((trigger): trigger is KeyChord => Boolean(trigger)) : [];
   return {
     enabled: guard?.enabled ?? defaultDictionaryDismissGuard.enabled,

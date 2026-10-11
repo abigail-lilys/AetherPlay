@@ -1,13 +1,14 @@
 import JSZip from "jszip";
-import { unnamespaceStorageKey } from "./keys";
-import { normalizeStoredPath } from "./paths";
-import type { GameRecord } from "./types";
+import {
+  VFS_BINARY_PREFIX,
+  VFS_DIR_PREFIX,
+  VFS_FILE_PREFIX,
+} from "@/shared/virtualFileSystem";
+import { unnamespaceStorageKey } from "@/src/lib/keys";
+import { normalizeStoredPath } from "@/src/lib/paths";
+import type { GameRecord } from "@/src/lib/types";
 
-const VFS_FILE_PREFIX = "__mz_player_desktop_fs:file:";
-const VFS_DIR_PREFIX = "__mz_player_desktop_fs:dir:";
-const VFS_BINARY_PREFIX = "__mz_player_desktop_fs:base64:";
-
-export interface SaveExportEntry {
+interface SaveExportEntry {
   path: string;
   data: string | Uint8Array;
 }
@@ -61,7 +62,7 @@ function exportDataForStorageValue(key: string, value: string): string | Uint8Ar
   return key.startsWith(VFS_FILE_PREFIX) ? decodeVirtualFileValue(value) : value;
 }
 
-export function collectSaveExportEntries(gameId: string, storage: StorageReader = window.localStorage): SaveExportEntry[] {
+function collectSaveExportEntries(gameId: string, storage: StorageReader = window.localStorage): SaveExportEntry[] {
   const entries = new Map<string, SaveExportEntry>();
 
   for (let index = 0; index < storage.length; index += 1) {

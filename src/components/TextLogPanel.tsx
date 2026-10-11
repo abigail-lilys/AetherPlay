@@ -1,4 +1,4 @@
-import { Icon } from "./Icon";
+import { Icon } from "@/src/components/Icon";
 
 interface TextLogPanelProps {
   logsOpen: boolean;

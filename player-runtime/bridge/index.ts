@@ -1,11 +1,11 @@
 // @ts-nocheck
 
-import { createParentBridge, postParent } from "./parentBridge";
-import { createSettingsStore } from "./settings";
-import { patchLocalStorage } from "./storageNamespace";
-import { createTextOverlayBridge } from "./overlay";
-import { createViewportBridge } from "./viewport";
-import { installRpgMakerEncryptionFallback } from "./encryptionFallback";
+import { createParentBridge, postParent } from "@/player-runtime/bridge/parentBridge";
+import { createSettingsStore } from "@/player-runtime/bridge/settings";
+import { patchLocalStorage } from "@/player-runtime/bridge/storageNamespace";
+import { createTextOverlayBridge } from "@/player-runtime/bridge/overlay";
+import { createViewportBridge } from "@/player-runtime/bridge/viewport";
+import { installRpgMakerEncryptionFallback } from "@/player-runtime/engines/rpgmaker_mvmz/encryption";
 
 (() => {
   const config = window.__MZ_PLAYER_BRIDGE__;

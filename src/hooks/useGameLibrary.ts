@@ -1,121 +1,62 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
+  bindSessionFolderCandidate,
   candidateFromDirectoryHandle,
   candidateFromFolder,
   candidateFromZip,
   importCandidate,
   importLocalFolderCandidate,
   importSessionFolderCandidate,
-  bindSessionFolderCandidate,
-} from "../lib/importer";
+} from "@/src/lib/importer";
+import {
+  chooseWebkitFolder,
+  localFolderAccessError,
+  pickLocalFolder,
+  requestLocalFolderPermission,
+  selectedFolderName,
+  supportsLocalFolderAccess,
+  type DirectoryInputElement,
+} from "@/src/lib/folderAccess";
 import {
   clearAllGameStorageNamespaces,
   clearGameStorageNamespace,
-} from "../lib/keys";
-import { normalizePlayerSettings } from "../lib/playerSettings";
-import { downloadSaveZip } from "../lib/saveExport";
-import { registerPlayerServiceWorker } from "../lib/serviceWorker";
+} from "@/src/lib/keys";
+import { normalizePlayerSettings } from "@/src/lib/playerSettings";
+import {
+  clearServiceWorkerGameCache,
+  clearServiceWorkerPlayerCache,
+  listenForSessionFileRequests,
+} from "@/src/lib/playerCache";
+import { downloadSaveZip } from "@/src/lib/saveExport";
+import { registerPlayerServiceWorker } from "@/src/lib/serviceWorker";
 import {
   clearAllSessionFolders,
   clearSessionFolder,
-  getSessionFolderFile,
   hasSessionFolder,
   registerSessionFolder,
-} from "../lib/sessionFiles";
+} from "@/src/lib/sessionFiles";
 import {
   clearPlayerStorage,
   deleteGame,
   estimateStorage,
   getAllGames,
-  getLocalFolderHandle,
   updateGameSettings,
-  type BrowserFileSystemDirectoryHandle,
-} from "../lib/storage";
-import type { GameRecord, ImportCandidate, ImportProgress } from "../lib/types";
+} from "@/src/lib/storage";
+import {
+  browserStorageError,
+  estimateStorageAfterMutation,
+  importErrorMessage,
+} from "@/src/lib/storageQuota";
+import type { GameRecord, ImportCandidate, ImportProgress } from "@/src/lib/types";
 
-export const idleProgress: ImportProgress = {
+const idleProgress: ImportProgress = {
   phase: "idle",
   label: "",
   completed: 0,
   total: 0,
 };
 
-const storageEstimateRetryDelaysMs = [0, 50, 150, 350, 750, 1500, 2500];
-
 type ImportCandidateReader = () => Promise<ImportCandidate>;
-type WindowWithDirectoryPicker = Window & {
-  showDirectoryPicker?: (options?: {
-    id?: string;
-    mode?: "read" | "readwrite";
-  }) => Promise<BrowserFileSystemDirectoryHandle>;
-};
-type DirectoryInputElement = HTMLInputElement & {
-  webkitEntries?: Array<{ isDirectory?: boolean; name?: string }>;
-};
-type ChosenWebkitFolder = {
-  files: File[];
-  folderName: string;
-};
-
-function clearServiceWorkerGameCache(gameId: string) {
-  navigator.serviceWorker.controller?.postMessage({
-    type: "clear-game-cache",
-    gameId,
-  });
-}
-
-function clearServiceWorkerPlayerCache(): Promise<void> {
-  return new Promise((resolve) => {
-    const controller = navigator.serviceWorker.controller;
-    if (!controller || typeof MessageChannel === "undefined") {
-      resolve();
-      return;
-    }
-
-    const channel = new MessageChannel();
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutId);
-      channel.port1.close();
-      resolve();
-    };
-    const timeoutId = window.setTimeout(finish, 1500);
-    channel.port1.onmessage = () => {
-      finish();
-    };
-    try {
-      controller.postMessage({
-        type: "clear-player-cache",
-      }, [channel.port2]);
-    } catch {
-      finish();
-    }
-  });
-}
-
-function supportsLocalFolderAccess(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof (window as WindowWithDirectoryPicker).showDirectoryPicker ===
-      "function"
-  );
-}
-
-function localFolderAccessError(): string | undefined {
-  if (typeof window === "undefined")
-    return "Folder access is not available in this browser.";
-  if (!window.isSecureContext)
-    return "Folder access requires HTTPS, localhost, or 127.0.0.1. Import a ZIP instead.";
-  if (
-    typeof (window as WindowWithDirectoryPicker).showDirectoryPicker !==
-    "function"
-  ) {
-    return "Folder access is not available. Import a ZIP instead.";
-  }
-  return undefined;
-}
 
 function waitForNextPaint(): Promise<void> {
   return new Promise((resolve) => {
@@ -125,134 +66,6 @@ function waitForNextPaint(): Promise<void> {
     }
     globalThis.setTimeout(resolve, 0);
   });
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    globalThis.setTimeout(resolve, ms);
-  });
-}
-
-function selectedFolderName(input: DirectoryInputElement, files: File[]): string {
-  const directoryEntry = input.webkitEntries?.find((entry) => entry.isDirectory && entry.name?.trim());
-  if (directoryEntry?.name) return directoryEntry.name.trim();
-
-  for (const file of files) {
-    const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
-    const folderName = path.split("/").find(Boolean);
-    if (folderName) return folderName;
-  }
-
-  return "";
-}
-
-async function estimateStorageAfterMutation(
-  previous?: StorageEstimate,
-): Promise<StorageEstimate | undefined> {
-  const previousUsage =
-    typeof previous?.usage === "number" ? previous.usage : undefined;
-  let latest: StorageEstimate | undefined;
-
-  for (const delayMs of storageEstimateRetryDelaysMs) {
-    if (delayMs > 0) await wait(delayMs);
-    latest = await estimateStorage();
-    if (
-      previousUsage === undefined ||
-      typeof latest?.usage !== "number" ||
-      latest.usage < previousUsage
-    ) {
-      return latest;
-    }
-  }
-
-  return latest;
-}
-
-function chooseWebkitFolder(): Promise<ChosenWebkitFolder> {
-  return new Promise((resolve) => {
-    const input = document.createElement("input") as DirectoryInputElement;
-    input.type = "file";
-    input.multiple = true;
-    input.className = "hidden-input";
-    input.setAttribute("webkitdirectory", "");
-
-    function finish(files: File[]) {
-      const folderName = selectedFolderName(input, files);
-      input.remove();
-      resolve({ files, folderName });
-    }
-
-    input.addEventListener(
-      "change",
-      () => {
-        finish(Array.from(input.files ?? []));
-      },
-      { once: true },
-    );
-    input.addEventListener(
-      "cancel",
-      () => {
-        finish([]);
-      },
-      { once: true },
-    );
-
-    document.body.append(input);
-    input.click();
-  });
-}
-
-async function requestLocalFolderPermission(gameId: string): Promise<boolean> {
-  const handle = await getLocalFolderHandle(gameId);
-  if (!handle) return false;
-
-  const current = handle.queryPermission
-    ? await handle.queryPermission({ mode: "read" })
-    : "granted";
-  if (current === "granted") return true;
-  if (current === "denied" || !handle.requestPermission) return false;
-
-  return (await handle.requestPermission({ mode: "read" })) === "granted";
-}
-
-async function availableBrowserStorage(): Promise<number | undefined> {
-  const estimate = await estimateStorage();
-  if (typeof estimate?.quota !== "number" || typeof estimate.usage !== "number")
-    return undefined;
-  return Math.max(0, estimate.quota - estimate.usage);
-}
-
-async function browserStorageError(
-  requiredBytes: number,
-): Promise<string | undefined> {
-  const availableBytes = await availableBrowserStorage();
-  if (availableBytes === undefined || requiredBytes <= availableBytes)
-    return undefined;
-
-  return browserStorageLimitMessage();
-}
-
-function browserStorageLimitMessage(): string {
-  return "Browser storage limit exceeded.";
-}
-
-function isBrowserStorageLimitError(cause: unknown): boolean {
-  if (!(cause instanceof Error)) return false;
-
-  const details = `${cause.name} ${cause.message}`;
-  return (
-    cause.name === "QuotaExceededError" ||
-    cause.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
-    /quota|storage.*exceed|exceed.*storage|out of.*storage/i.test(details)
-  );
-}
-
-function importErrorMessage(cause: unknown): string {
-  if (isBrowserStorageLimitError(cause)) {
-    return browserStorageLimitMessage();
-  }
-
-  return cause instanceof Error ? cause.message : "Import failed.";
 }
 
 export function useGameLibrary(onImportStart?: () => void) {
@@ -304,35 +117,7 @@ export function useGameLibrary(onImportStart?: () => void) {
     return () => window.clearTimeout(timeoutId);
   }, [error]);
 
-  useEffect(() => {
-    function onServiceWorkerMessage(event: MessageEvent) {
-      if (event.data?.type !== "session-file-request") return;
-
-      const port = event.ports[0];
-      if (!port) return;
-
-      const gameId =
-        typeof event.data.gameId === "string" ? event.data.gameId : "";
-      const path = typeof event.data.path === "string" ? event.data.path : "";
-      const file = getSessionFolderFile(gameId, path);
-
-      port.postMessage({
-        type: "session-file-response",
-        ok: Boolean(file),
-        file,
-      });
-    }
-
-    navigator.serviceWorker?.addEventListener(
-      "message",
-      onServiceWorkerMessage,
-    );
-    return () =>
-      navigator.serviceWorker?.removeEventListener(
-        "message",
-        onServiceWorkerMessage,
-      );
-  }, []);
+  useEffect(() => listenForSessionFileRequests(), []);
 
   async function boot() {
     setError(null);
@@ -406,20 +191,13 @@ export function useGameLibrary(onImportStart?: () => void) {
     setNotice(null);
     onImportStart?.();
     try {
-      const picker = (window as WindowWithDirectoryPicker).showDirectoryPicker;
-      if (!picker)
-        throw new Error("This browser cannot read folders directly.");
-
       setProgress({
         phase: "reading",
         label: "Choose a folder",
         completed: 0,
         total: 1,
       });
-      const handle = await picker.call(window, {
-        id: "game-folder",
-        mode: "read",
-      });
+      const handle = await pickLocalFolder();
       setProgress({
         phase: "reading",
         label: "Scanning folder",

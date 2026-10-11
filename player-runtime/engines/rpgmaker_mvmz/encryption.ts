@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { bytesToHex, imageMimeType } from "@/shared/binary";
+import { createArrayBufferObjectUrl } from "@/shared/blob";
 
 const RPG_MAKER_HEADER_HEX = "5250474d560000000003010000000000";
 const ENCRYPTION_FALLBACK_INSTALL_INTERVAL_MS = 10;
@@ -7,22 +9,11 @@ const PNG_HEADER_BYTES = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
   0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 ]);
-const JPEG_HEADER_BYTES = new Uint8Array([0xff, 0xd8, 0xff]);
-const GIF87A_HEADER_BYTES = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x37, 0x61]);
-const GIF89A_HEADER_BYTES = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
-const WEBP_RIFF_HEADER_BYTES = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
-const WEBP_WEBP_HEADER_BYTES = new Uint8Array([0x57, 0x45, 0x42, 0x50]);
 const OGG_HEADER_BYTES = new Uint8Array([0x4f, 0x67, 0x67, 0x53]);
 const RIFF_HEADER_BYTES = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
 const WAVE_HEADER_BYTES = new Uint8Array([0x57, 0x41, 0x56, 0x45]);
 const ID3_HEADER_BYTES = new Uint8Array([0x49, 0x44, 0x33]);
 const MP4_FTYP_HEADER_BYTES = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
-
-function bytesToHex(bytes) {
-  let output = "";
-  for (const byte of bytes) output += byte.toString(16).padStart(2, "0");
-  return output;
-}
 
 function startsWithBytes(bytes, expected) {
   if (!bytes || bytes.byteLength < expected.byteLength) return false;
@@ -37,34 +28,11 @@ function hasRpgMakerHeader(bytes) {
   return bytesToHex(bytes.slice(0, 16)) === RPG_MAKER_HEADER_HEX;
 }
 
-export function isPngArrayBuffer(arrayBuffer) {
-  if (!arrayBuffer) return false;
-  return startsWithBytes(new Uint8Array(arrayBuffer), PNG_HEADER_BYTES);
+function isImageArrayBuffer(arrayBuffer) {
+  return Boolean(imageMimeType(arrayBuffer));
 }
 
-export function imageMimeTypeForArrayBuffer(arrayBuffer) {
-  if (!arrayBuffer) return undefined;
-  const bytes = new Uint8Array(arrayBuffer);
-  if (startsWithBytes(bytes, PNG_HEADER_BYTES)) return "image/png";
-  if (startsWithBytes(bytes, JPEG_HEADER_BYTES)) return "image/jpeg";
-  if (startsWithBytes(bytes, GIF87A_HEADER_BYTES) || startsWithBytes(bytes, GIF89A_HEADER_BYTES)) {
-    return "image/gif";
-  }
-  if (
-    bytes.byteLength >= 12 &&
-    startsWithBytes(bytes, WEBP_RIFF_HEADER_BYTES) &&
-    startsWithBytes(bytes.slice(8, 12), WEBP_WEBP_HEADER_BYTES)
-  ) {
-    return "image/webp";
-  }
-  return undefined;
-}
-
-export function isImageArrayBuffer(arrayBuffer) {
-  return Boolean(imageMimeTypeForArrayBuffer(arrayBuffer));
-}
-
-export function isAudioArrayBuffer(arrayBuffer) {
+function isAudioArrayBuffer(arrayBuffer) {
   if (!arrayBuffer) return false;
   const bytes = new Uint8Array(arrayBuffer);
   if (startsWithBytes(bytes, OGG_HEADER_BYTES)) return true;
@@ -80,7 +48,7 @@ export function isAudioArrayBuffer(arrayBuffer) {
   return bytes.byteLength >= 12 && startsWithBytes(bytes.slice(4, 8), MP4_FTYP_HEADER_BYTES);
 }
 
-export function isMediaArrayBuffer(arrayBuffer) {
+function isMediaArrayBuffer(arrayBuffer) {
   return isImageArrayBuffer(arrayBuffer) || isAudioArrayBuffer(arrayBuffer);
 }
 
@@ -100,20 +68,14 @@ function repairRpgMakerEncryptedPng(arrayBuffer, defaultResult) {
 }
 
 function createImageBlobUrl(arrayBuffer) {
-  const mimeType = imageMimeTypeForArrayBuffer(arrayBuffer);
-  if (
-    mimeType &&
-    typeof Blob !== "undefined" &&
-    window.URL &&
-    typeof window.URL.createObjectURL === "function"
-  ) {
-    return window.URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
-  }
-  return Decrypter.createBlobUrl(arrayBuffer);
+  const mimeType = imageMimeType(arrayBuffer);
+  return createArrayBufferObjectUrl(arrayBuffer, mimeType, () =>
+    Decrypter.createBlobUrl(arrayBuffer),
+  );
 }
 
-export function decryptImageArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {
-  if (imageMimeTypeForArrayBuffer(arrayBuffer)) return arrayBuffer;
+function decryptImageArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {
+  if (imageMimeType(arrayBuffer)) return arrayBuffer;
 
   let defaultResult;
   try {
@@ -122,11 +84,11 @@ export function decryptImageArrayBufferWithFallback(arrayBuffer, defaultDecrypt)
     defaultResult = undefined;
   }
 
-  if (imageMimeTypeForArrayBuffer(defaultResult)) return defaultResult;
+  if (imageMimeType(defaultResult)) return defaultResult;
   return repairRpgMakerEncryptedPng(arrayBuffer, defaultResult);
 }
 
-export function decryptMediaArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {
+function decryptMediaArrayBufferWithFallback(arrayBuffer, defaultDecrypt) {
   if (isMediaArrayBuffer(arrayBuffer)) return arrayBuffer;
 
   let defaultResult;

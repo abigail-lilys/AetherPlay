@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { frameElementRect, scheduleMicrotask } from "@/shared/browser";
+import { setWritableProperty as setShimProperty } from "@/shared/object";
 
 export function createNwRuntime() {
   let clipboardText = "";
@@ -20,16 +22,6 @@ export function createNwRuntime() {
     }
   });
 
-  function frameElementRect() {
-    try {
-      const rect = window.frameElement?.getBoundingClientRect?.();
-      if (rect && rect.width > 0 && rect.height > 0) return rect;
-    } catch {
-      // frameElement can be blocked in unusual embed contexts.
-    }
-    return null;
-  }
-
   function playerFrameWidth() {
     const rect = frameElementRect();
     return (
@@ -50,24 +42,6 @@ export function createNwRuntime() {
       document.documentElement.clientHeight ||
       624
     );
-  }
-
-  function setShimProperty(target, key, value) {
-    try {
-      target[key] = value;
-      if (target[key] === value) return;
-    } catch {
-      // Some host objects reject direct assignment.
-    }
-    try {
-      Object.defineProperty(target, key, {
-        configurable: true,
-        value,
-        writable: true,
-      });
-    } catch {
-      // Non-extensible host objects can still be usable through the base shim.
-    }
   }
 
   function decorateWindowShim(value) {
@@ -197,7 +171,7 @@ export function createNwRuntime() {
         eventListeners.add(listener);
         listeners.set(eventName, eventListeners);
         if (eventName === "loaded" && loaded) {
-          queueMicrotask(() => listener.call(shim));
+          scheduleMicrotask(() => listener.call(shim));
         }
         return shim;
       },
@@ -252,7 +226,7 @@ export function createNwRuntime() {
     get: () => decorateWindowShim(windowShim),
     open(url, options, callback) {
       const openedWindow = createWindowShim();
-      queueMicrotask(() => {
+      scheduleMicrotask(() => {
         if (typeof callback === "function") callback(openedWindow);
         openedWindow.__emit("loaded");
       });

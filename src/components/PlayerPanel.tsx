@@ -1,8 +1,8 @@
 import type { CSSProperties, RefObject } from "react";
-import { playUrl } from "../lib/playerUrls";
-import type { GameRecord } from "../lib/types";
-import { Icon } from "./Icon";
-import { TextLogPanel } from "./TextLogPanel";
+import { playUrl } from "@/src/lib/playerUrls";
+import type { GameRecord } from "@/src/lib/types";
+import { Icon } from "@/src/components/Icon";
+import { TextLogPanel } from "@/src/components/TextLogPanel";
 
 const githubUrl = "https://github.com/popupie/mv-mz-browser-player";
 
@@ -118,9 +118,8 @@ export function PlayerPanel({
                 <div className="home-control-cell">
                   <Icon name="layers" />
                   <span>
-                    Overlay captures RPG Maker canvas text and TyranoScript HTML
-                    dialogue for selection and the text log. WOLF games do not
-                    use text overlays or logging.
+                    Overlay captures text or sprite-font dialogue for selection
+                    and the text log.
                   </span>
                 </div>
 

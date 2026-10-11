@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ParentToPlayerMessage } from "../lib/types";
+import type { ParentToPlayerMessage } from "@/src/lib/types";
 
 export function usePlayerFrame(activeGameId?: string) {
   const [gameAspectRatio, setGameAspectRatio] = useState(16 / 9);

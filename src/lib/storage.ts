@@ -1,6 +1,6 @@
-import { detectMime } from "./mime";
-import { normalizeStoredPath } from "./paths";
-import type { GameRecord, StoredGameFile } from "./types";
+import { detectMime } from "@/src/lib/mime";
+import { normalizeStoredPath } from "@/src/lib/paths";
+import type { GameRecord, StoredGameFile } from "@/src/lib/types";
 
 const DB_NAME = "mvmz-browser-player";
 const DB_VERSION = 2;
@@ -48,15 +48,11 @@ export function fileKey(gameId: string, path: string): string {
   return `${gameId}\n${normalizeStoredPath(path)}`;
 }
 
-export function normalizeGameRecord(game: GameRecord): GameRecord {
+function normalizeGameRecord(game: GameRecord): GameRecord {
   return {
     ...game,
     sourceKind: game.sourceKind ?? "stored",
   };
-}
-
-export function gameStoreNamesDeletedWithGame(): readonly string[] {
-  return DELETE_GAME_STORES;
 }
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
@@ -74,7 +70,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-export async function openPlayerDb(): Promise<IDBDatabase> {
+async function openPlayerDb(): Promise<IDBDatabase> {
   const request = indexedDB.open(DB_NAME, DB_VERSION);
 
   request.onupgradeneeded = () => {
@@ -103,17 +99,6 @@ export async function getAllGames(): Promise<GameRecord[]> {
     const transaction = db.transaction(GAME_STORE, "readonly");
     const games = await requestToPromise<GameRecord[]>(transaction.objectStore(GAME_STORE).getAll());
     return games.map(normalizeGameRecord).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  } finally {
-    db.close();
-  }
-}
-
-export async function getGame(gameId: string): Promise<GameRecord | undefined> {
-  const db = await openPlayerDb();
-  try {
-    const transaction = db.transaction(GAME_STORE, "readonly");
-    const game = await requestToPromise<GameRecord | undefined>(transaction.objectStore(GAME_STORE).get(gameId));
-    return game ? normalizeGameRecord(game) : undefined;
   } finally {
     db.close();
   }
@@ -335,17 +320,6 @@ export async function putIndexedDbBlobs(records: Array<{ gameId: string; path: s
     const { key: _key, ...record } = fileRecord;
     return record;
   });
-}
-
-export async function getIndexedDbBlob(storageRef: string): Promise<Blob | undefined> {
-  const db = await openPlayerDb();
-  try {
-    const transaction = db.transaction(BLOB_STORE, "readonly");
-    const record = await requestToPromise<StoredBlobRecord | undefined>(transaction.objectStore(BLOB_STORE).get(storageRef));
-    return record?.blob;
-  } finally {
-    db.close();
-  }
 }
 
 function getOpfsRoot(): Promise<BrowserFileSystemDirectoryHandle> | undefined {

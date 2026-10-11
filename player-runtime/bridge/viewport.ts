@@ -1,8 +1,9 @@
 // @ts-nocheck
 
-import { positiveFiniteNumber } from "./keyEvents";
+import { frameElementRect } from "@/shared/browser";
+import { positiveFiniteNumber } from "@/player-runtime/bridge/keyEvents";
 
-export function detectNativeGameSize({ graphics, tyranoConfig, canvas }) {
+function detectNativeGameSize({ graphics, tyranoConfig, canvas }) {
   function size(width, height) {
     const normalizedWidth = positiveFiniteNumber(width);
     const normalizedHeight = positiveFiniteNumber(height);
@@ -56,18 +57,8 @@ export function createViewportBridge({ postParentMessage, scheduleFlush }) {
     scheduleViewportFit();
   }
 
-  function playerFrameRect() {
-    try {
-      const rect = window.frameElement?.getBoundingClientRect?.();
-      if (rect && rect.width > 0 && rect.height > 0) return rect;
-    } catch {
-      // Ignore unusual embed contexts.
-    }
-    return null;
-  }
-
   function playerViewport() {
-    const rect = playerFrameRect();
+    const rect = frameElementRect();
     return {
       width: rect?.width || latestPlayerViewport?.width || window.innerWidth || document.documentElement.clientWidth,
       height: rect?.height || latestPlayerViewport?.height || window.innerHeight || document.documentElement.clientHeight,

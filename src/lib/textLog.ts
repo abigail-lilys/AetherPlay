@@ -1,6 +1,4 @@
-export function textLogDedupeKey(text: string): string {
-  return text.replace(/\s+/gu, " ").trim();
-}
+import { textLogDedupeKey } from "@/shared/text";
 
 export function appendTextLog(items: string[], text: string, limit: number): string[] {
   const key = textLogDedupeKey(text);

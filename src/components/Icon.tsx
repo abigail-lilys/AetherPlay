@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type IconName =
+type IconName =
   | "archive"
   | "chevronDown"
   | "download"

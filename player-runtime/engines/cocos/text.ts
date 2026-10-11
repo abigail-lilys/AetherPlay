@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { cssTransformFromTopLeftPoints } from "@/player-runtime/bridge/overlay/geometry";
 
 const COCOS_NAMED_ENTITIES = {
   amp: "&",
@@ -93,7 +94,7 @@ export function cocosVerticalAlignFactor(value) {
   return 0;
 }
 
-export function cocosFontFamily(source) {
+function cocosFontFamily(source) {
   const renderedFamily = source?.textStyle?.fontFamily || source?._textStyle?.fontFamily;
   const usesSystemFont = source?.useSystemFont ?? source?._isSystemFontUsed;
   const assetFamily = source?.font?._nativeAsset || source?._font?._nativeAsset;
@@ -228,27 +229,9 @@ export function cocosCssTransformFromScreenPoints(
     x: canvasRect.left + Number(point?.x) * scaleX,
     y: canvasRect.top + (pixelHeight - Number(point?.y)) * scaleY,
   }));
-  if (cssPoints.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
-    return null;
-  }
-
-  const [bottomLeft, , topRight, topLeft] = cssPoints;
-  return {
-    left: topLeft.x,
-    top: topLeft.y,
+  return cssTransformFromTopLeftPoints(
+    [cssPoints[3], cssPoints[2], cssPoints[1], cssPoints[0]],
     width,
     height,
-    matrix: {
-      a: (topRight.x - topLeft.x) / width,
-      b: (topRight.y - topLeft.y) / width,
-      c: (bottomLeft.x - topLeft.x) / height,
-      d: (bottomLeft.y - topLeft.y) / height,
-    },
-    bounds: {
-      left: Math.min(...cssPoints.map((point) => point.x)),
-      top: Math.min(...cssPoints.map((point) => point.y)),
-      right: Math.max(...cssPoints.map((point) => point.x)),
-      bottom: Math.max(...cssPoints.map((point) => point.y)),
-    },
-  };
+  );
 }

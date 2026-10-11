@@ -4,3 +4,4 @@ public/mz-player-runtime/
 .pnpm-store/
 .DS_Store
 *.tsbuildinfo
+tests/

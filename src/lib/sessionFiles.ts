@@ -1,4 +1,4 @@
-import { normalizeStoredPath } from "./paths";
+import { normalizeStoredPath } from "@/src/lib/paths";
 
 type SessionFileEntry = {
   path: string;

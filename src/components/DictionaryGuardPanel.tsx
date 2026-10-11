@@ -1,7 +1,7 @@
 import type { KeyboardEvent } from "react";
-import type { DictionaryDismissGuard, GameRecord } from "../lib/types";
-import { chordLabel } from "../lib/keyChords";
-import { Icon } from "./Icon";
+import type { DictionaryDismissGuard, GameRecord } from "@/src/lib/types";
+import { chordLabel } from "@/src/lib/keyChords";
+import { Icon } from "@/src/components/Icon";
 
 interface DictionaryGuardPanelProps {
   activeGame?: GameRecord;

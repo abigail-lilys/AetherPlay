@@ -1,5 +1,5 @@
-import type { PlayerSettings } from "./types";
-import { defaultDictionaryDismissGuard, defaultReservedKeys } from "./playerSettings";
+import type { PlayerSettings } from "@/src/lib/types";
+import { defaultDictionaryDismissGuard, defaultReservedKeys } from "@/src/lib/playerSettings";
 
 export const defaultPlayerSettings = (): PlayerSettings => ({
   overlayEnabled: false,
