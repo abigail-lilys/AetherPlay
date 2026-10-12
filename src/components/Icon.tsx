@@ -11,6 +11,7 @@ type IconName =
   | "home"
   | "layers"
   | "logs"
+  | "moreVertical"
   | "plus"
   | "shield"
   | "trash"
@@ -77,6 +78,13 @@ export function Icon({ name }: { name: IconName }) {
         <path d="M5 5h14" />
         <path d="M5 12h14" />
         <path d="M5 19h14" />
+      </>
+    ),
+    moreVertical: (
+      <>
+        <circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none" />
       </>
     ),
     plus: (

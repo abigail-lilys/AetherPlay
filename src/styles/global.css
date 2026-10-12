@@ -383,7 +383,7 @@ progress::-moz-progress-bar {
 
 .game-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px 40px;
+  grid-template-columns: minmax(0, 1fr) 40px;
   min-height: 67.5px;
   gap: 8px;
   align-items: stretch;
@@ -444,6 +444,67 @@ progress::-moz-progress-bar {
   height: 40px;
   min-height: 40px;
   padding: 0;
+}
+
+.game-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.game-actions-toggle {
+  border-color: transparent;
+}
+
+.game-actions-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  gap: 1px;
+  width: 148px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 6px;
+  background: var(--color-sidebar-hover);
+  box-shadow: 0 6px 16px rgba(2, 6, 23, 0.22);
+}
+
+.game-actions-menu .game-action-button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 31px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #f8fafc;
+  font-size: 13px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.game-actions-menu .game-action-button:hover,
+.game-actions-menu .game-action-button:focus-visible {
+  border-color: transparent;
+  background: rgba(248, 250, 252, 0.08);
+}
+
+.game-action-button .icon {
+  width: 14px;
+  height: 14px;
+  margin: auto;
+}
+
+.game-action-button span {
+  color: inherit;
+}
+
+.game-actions-menu .game-action-button.danger {
+  color: #fca5a5;
 }
 
 .storage-meter {
