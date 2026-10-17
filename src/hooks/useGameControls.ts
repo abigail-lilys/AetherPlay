@@ -228,28 +228,9 @@ export function useGameControls({
           });
         }
       };
-      const experiment = () => {
-        const w = frame?.contentWindow as FrameWin | null;
-        const d = w?.document;
-        if (!w || !d) return;
-        for (const id of ["screen-holder-left", "screen-holder-right"]) {
-          d.getElementById(id)?.style.setProperty("display", "flex", "important");
-        }
-        for (const id of ["screen-left", "screen-right"]) {
-          const e = d.getElementById(id);
-          if (!e) continue;
-          e.style.setProperty("display", "block", "important");
-          e.style.setProperty("width", "100%", "important");
-          e.style.setProperty("height", "100%", "important");
-        }
-        w.adjustGameUI?.();
-      };
       probe("iframe-load");
       window.setTimeout(() => probe("after-3s"), 3000);
-      window.setTimeout(() => {
-        experiment();
-        probe("after-experiment");
-      }, 4000);
+      window.setTimeout(() => probe("after-6s"), 6000);
     }
     const game = library.activeGame;
     if (!game) return;

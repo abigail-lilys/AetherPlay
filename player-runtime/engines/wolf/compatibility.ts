@@ -81,6 +81,40 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
       display: none !important;
     }
 
+    html.mz-player-browser-woditor.mz-player-wolf-sides #container {
+      display: grid !important;
+      grid-template-columns: var(--mz-player-wolf-side-width, 0px) minmax(0, 1fr) var(--mz-player-wolf-side-width, 0px) !important;
+      grid-template-rows: minmax(0, 1fr) !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-sides #screen-holder-left,
+    html.mz-player-browser-woditor.mz-player-wolf-sides #screen-holder-right {
+      display: flex !important;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      height: 100% !important;
+      min-width: 0 !important;
+      min-height: 0 !important;
+      margin: 0 !important;
+      padding: 2px !important;
+      overflow: hidden !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-sides #screen-holder-left {
+      grid-column: 1 !important;
+      order: 1 !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-sides #screen-holder-main {
+      grid-column: 2 !important;
+      order: 2 !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-sides #screen-holder-right {
+      grid-column: 3 !important;
+      order: 3 !important;
+    }
+
     html.mz-player-browser-woditor #main {
       position: relative !important;
       top: 0 !important;
@@ -107,15 +141,51 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
   `;
   document.documentElement.appendChild(style);
 
+  // Touch side panels: the game's own HOLD/DRAG/Sub/Cancel/Enter UI lives in
+  // #screen-holder-left/right. Reserve space for them only when the game wants
+  // them and the viewport is landscape; otherwise keep the canvas-only layout.
+  function readWolfGameSettings(): { hideSideButtons?: boolean } | null {
+    try {
+      return (0, eval)(
+        "typeof WoditorGameSettings === 'undefined' ? null : WoditorGameSettings",
+      ) as { hideSideButtons?: boolean } | null;
+    } catch {
+      return null;
+    }
+  }
+
+  const WOLF_SIDE_MIN = 96;
+  const WOLF_SIDE_MAX = 240;
+
+  function wolfSideWidth(canvas: HTMLCanvasElement, fullWidth: number, fullHeight: number): number {
+    if (readWolfGameSettings()?.hideSideButtons) return 0;
+    if (!document.getElementById("screen-holder-left")) return 0;
+    if (!document.getElementById("screen-holder-right")) return 0;
+    if (fullWidth / fullHeight < 3.5 / 4) return 0;
+    const free = (fullWidth - canvas.width * (fullHeight / canvas.height)) / 2;
+    const side = Math.min(WOLF_SIDE_MAX, Math.max(WOLF_SIDE_MIN, free));
+    return side * 2 > fullWidth * 0.6 ? 0 : Math.round(side);
+  }
+
+  function applyWolfSides(side: number) {
+    const rootElement = document.documentElement;
+    rootElement.classList.toggle("mz-player-wolf-sides", side > 0);
+    rootElement.style.setProperty("--mz-player-wolf-side-width", `${side}px`);
+  }
+
   function postParent(message: object) {
     window.parent.postMessage(message, window.location.origin);
   }
 
   function syncCanvasViewport(canvas: HTMLCanvasElement) {
     if (canvas.width <= 0 || canvas.height <= 0) return;
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const fullWidth = document.documentElement.clientWidth || window.innerWidth;
     const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
-    if (viewportWidth <= 0 || viewportHeight <= 0) return;
+    if (fullWidth <= 0 || viewportHeight <= 0) return;
+    const side = wolfSideWidth(canvas, fullWidth, viewportHeight);
+    applyWolfSides(side);
+    const viewportWidth = fullWidth - side * 2;
+    if (viewportWidth <= 0) return;
     const scale = Math.min(viewportWidth / canvas.width, viewportHeight / canvas.height);
     const cssWidth = canvas.width * scale;
     const cssHeight = canvas.height * scale;
