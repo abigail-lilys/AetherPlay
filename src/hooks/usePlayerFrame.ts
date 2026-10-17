@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ParentToPlayerMessage } from "@/src/lib/types";
+import { setAndroidImmersive } from "@/src/lib/androidImmersive";
 
 export function usePlayerFrame(activeGameId?: string) {
   const [gameAspectRatio, setGameAspectRatio] = useState(16 / 9);
@@ -7,6 +8,7 @@ export function usePlayerFrame(activeGameId?: string) {
   const frameWrapRef = useRef<HTMLDivElement>(null);
   const viewportNotifyFrameRef = useRef<number | null>(null);
   const lastViewportRef = useRef("");
+  const immersiveRef = useRef(false);
 
   useEffect(() => {
     if (!activeGameId) return;
@@ -78,10 +80,25 @@ export function usePlayerFrame(activeGameId?: string) {
     window.setTimeout(() => postPlayerMessage({ type: "focus-game" }), 80);
   }
 
-  async function requestFullscreen() {
-    await frameWrapRef.current?.requestFullscreen({ navigationUI: "hide" });
+  async function setImmersiveMode(enabled: boolean) {
+    const handledNatively = await setAndroidImmersive(enabled);
+    if (!handledNatively) {
+      if (enabled) {
+        const target = frameWrapRef.current;
+        if (target && document.fullscreenElement !== target) {
+          await target.requestFullscreen({ navigationUI: "hide" });
+        }
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      }
+    }
+    immersiveRef.current = enabled;
     schedulePlayerViewportNotify();
-    scheduleFocusPlayer();
+    if (enabled) scheduleFocusPlayer();
+  }
+
+  async function requestFullscreen() {
+    await setImmersiveMode(!immersiveRef.current);
   }
 
   function resetViewportCache() {
@@ -95,6 +112,7 @@ export function usePlayerFrame(activeGameId?: string) {
     gameAspectRatio,
     postPlayerMessage,
     requestFullscreen,
+    setImmersiveMode,
     resetViewportCache,
     scheduleFocusPlayer,
     schedulePlayerViewportNotify,

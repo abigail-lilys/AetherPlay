@@ -1,6 +1,6 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
-export type GameScreenOrientation = "landscape" | "portrait";
+export type GameScreenOrientation = "landscape" | "portrait" | "system";
 
 interface AndroidOrientationAPI {
   setOrientation(options: { orientation: GameScreenOrientation }): Promise<{ orientation: GameScreenOrientation }>;

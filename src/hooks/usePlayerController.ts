@@ -125,6 +125,15 @@ export function usePlayerController() {
   }, []);
 
   useEffect(() => {
+    void player.setImmersiveMode(Boolean(library.activeGame)).catch((cause) => {
+      logDiagnostic("warn", "android.immersive-mode.change.failed", {
+        activeGameId: library.activeGame?.id,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    });
+  }, [library.activeGame?.id]);
+
+  useEffect(() => {
     setRuntimeLogTarget(null);
     const game = library.activeGame;
     if (!game || Capacitor.getPlatform() !== "android") return;

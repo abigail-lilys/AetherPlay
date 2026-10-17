@@ -196,41 +196,58 @@ public class AndroidFolderPickerPlugin extends Plugin {
             String rootId = DocumentsContract.getTreeDocumentId(treeUri);
             Uri parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId);
             ContentResolver resolver = getContext().getContentResolver();
-            Uri logUri = findChildDocument(treeUri, rootId, "runtime.log");
+            java.util.List<RuntimeLogDocument> oldLogs = listRuntimeLogDocuments(treeUri, rootId);
+
+            // Use an explicit .txt extension because SAF's text/plain provider adds it itself.
+            Uri logUri = findChildDocument(treeUri, rootId, "runtime.log.txt");
+            if (logUri == null) logUri = findChildDocument(treeUri, rootId, "runtime.log");
             if (logUri == null) {
-                logUri = DocumentsContract.createDocument(resolver, parentUri, "text/plain", "runtime.log");
+                logUri = DocumentsContract.createDocument(resolver, parentUri, "text/plain", "runtime.log.txt");
             }
-            if (logUri == null) throw new IllegalStateException("Could not create runtime.log in the selected game folder");
+            if (logUri == null) throw new IllegalStateException("Could not create runtime.log.txt in the selected game folder");
 
             byte[] incoming = content.getBytes(StandardCharsets.UTF_8);
             if (incoming.length > MAX_RUNTIME_LOG_BYTES) {
                 incoming = Arrays.copyOfRange(incoming, incoming.length - MAX_RUNTIME_LOG_BYTES, incoming.length);
             }
 
-            long existingSize = getDocumentSize(logUri);
-            boolean trimmed = existingSize + incoming.length > MAX_RUNTIME_LOG_BYTES;
-            if (trimmed) {
-                int bytesToKeep = Math.max(0, MAX_RUNTIME_LOG_BYTES - incoming.length);
-                byte[] oldTail = bytesToKeep > 0 ? readDocumentTail(logUri, bytesToKeep) : new byte[0];
-                byte[] compacted = new byte[oldTail.length + incoming.length];
-                System.arraycopy(oldTail, 0, compacted, 0, oldTail.length);
-                System.arraycopy(incoming, 0, compacted, oldTail.length, incoming.length);
-                writeDocumentBytes(logUri, compacted, "wt");
+            boolean consolidate = oldLogs.size() > 1;
+            if (!consolidate && oldLogs.size() == 1 && !oldLogs.get(0).uri.toString().equals(logUri.toString())) {
+                consolidate = true;
+            }
+            if (consolidate) {
+                // Merge existing duplicate fragments once, oldest first, retaining the latest 512 KiB.
+                java.util.Collections.sort(oldLogs, java.util.Comparator.comparingLong(item -> item.lastModified));
+                ByteArrayOutputStream combinedOut = new ByteArrayOutputStream();
+                for (RuntimeLogDocument item : oldLogs) {
+                    byte[] oldBytes = readDocumentBytes(item.uri);
+                    combinedOut.write(oldBytes);
+                    if (oldBytes.length > 0 && oldBytes[oldBytes.length - 1] != '\n') combinedOut.write('\n');
+                }
+                combinedOut.write(incoming);
+                byte[] combined = tailBytes(combinedOut.toByteArray(), MAX_RUNTIME_LOG_BYTES);
+                writeDocumentBytes(logUri, combined, "wt");
             } else {
-                writeDocumentBytes(logUri, incoming, "wa");
+                long existingSize = getDocumentSize(logUri);
+                if (existingSize + incoming.length > MAX_RUNTIME_LOG_BYTES) {
+                    int keep = Math.max(0, MAX_RUNTIME_LOG_BYTES - incoming.length);
+                    byte[] oldTail = keep > 0 ? readDocumentTail(logUri, keep) : new byte[0];
+                    byte[] compacted = new byte[oldTail.length + incoming.length];
+                    System.arraycopy(oldTail, 0, compacted, 0, oldTail.length);
+                    System.arraycopy(incoming, 0, compacted, oldTail.length, incoming.length);
+                    writeDocumentBytes(logUri, compacted, "wt");
+                } else {
+                    writeDocumentBytes(logUri, incoming, "wa");
+                }
             }
 
-            // Remove the legacy rotating backup so the selected game folder keeps one log file only.
-            try {
-                Uri oldBackup = findChildDocument(treeUri, rootId, "runtime.log.1");
-                if (oldBackup != null) DocumentsContract.deleteDocument(resolver, oldBackup);
-            } catch (Exception ignored) {
-                // Existing backup cleanup must not interrupt game startup.
-            }
+            // Remove .1 and numbered .txt copies after consolidation, leaving one log document.
+            deleteDuplicateRuntimeLogs(treeUri, rootId, resolver, logUri);
             JSObject response = new JSObject();
             response.put("uri", logUri.toString());
-            response.put("trimmed", trimmed);
+            response.put("trimmed", consolidate || getDocumentSize(logUri) >= MAX_RUNTIME_LOG_BYTES);
             response.put("bytesWritten", incoming.length);
+            response.put("singleLogFile", true);
             call.resolve(response);
         } catch (Exception error) {
             call.reject("Could not write runtime.log to the selected game folder: " + error.getMessage(), error);
@@ -270,6 +287,75 @@ public class AndroidFolderPickerPlugin extends Plugin {
             call.resolve(response);
         } catch (Exception error) {
             call.reject("Could not save diagnostics TXT: " + error.getMessage(), error);
+        }
+    }
+
+    // RUNTIME_LOG_DEDUP_PATCH
+    private static final class RuntimeLogDocument {
+        final Uri uri;
+        final String name;
+        final long lastModified;
+        RuntimeLogDocument(Uri uri, String name, long lastModified) {
+            this.uri = uri;
+            this.name = name;
+            this.lastModified = lastModified;
+        }
+    }
+
+    private boolean isRuntimeLogName(String name) {
+        return "runtime.log".equals(name)
+            || "runtime.log.txt".equals(name)
+            || "runtime.log.1".equals(name)
+            || (name != null && name.matches("runtime\\.log \\(\\d+\\)\\.txt"));
+    }
+
+    private java.util.List<RuntimeLogDocument> listRuntimeLogDocuments(Uri treeUri, String parentId) throws Exception {
+        java.util.List<RuntimeLogDocument> result = new java.util.ArrayList<>();
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId);
+        String[] columns = {
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
+        };
+        try (Cursor cursor = getContext().getContentResolver().query(childrenUri, columns, null, null, null)) {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    String name = cursor.getString(1);
+                    if (!isRuntimeLogName(name)) continue;
+                    long modified = cursor.isNull(2) ? 0L : cursor.getLong(2);
+                    Uri uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, cursor.getString(0));
+                    result.add(new RuntimeLogDocument(uri, name, modified));
+                }
+            }
+        }
+        return result;
+    }
+
+    private byte[] readDocumentBytes(Uri uri) throws Exception {
+        try (InputStream input = getContext().getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) throw new IllegalStateException("Cannot read existing runtime log fragment");
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            return output.toByteArray();
+        }
+    }
+
+    private byte[] tailBytes(byte[] input, int maxBytes) {
+        if (input.length <= maxBytes) return input;
+        return Arrays.copyOfRange(input, input.length - maxBytes, input.length);
+    }
+
+    private void deleteDuplicateRuntimeLogs(Uri treeUri, String parentId, ContentResolver resolver, Uri keepUri) {
+        try {
+            for (RuntimeLogDocument item : listRuntimeLogDocuments(treeUri, parentId)) {
+                if (!item.uri.toString().equals(keepUri.toString())) {
+                    try { DocumentsContract.deleteDocument(resolver, item.uri); } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {
+            // Best-effort cleanup must not interrupt game startup.
         }
     }
 

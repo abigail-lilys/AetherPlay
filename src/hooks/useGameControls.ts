@@ -3,6 +3,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { logDiagnostic } from "@/src/lib/diagnostics";
 import { chordFromEvent, sameChord } from "@/src/lib/keyChords";
 import { reservedKeyForEvent } from "@/src/lib/keys";
 import {
@@ -151,6 +152,35 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
+    // WOLF_TOUCH_UI_RESTORE_PATCH: restore the built-in HOLD/DRAG/Sub/Cancel/Enter controls.
+    try {
+      const frameWindow = player.frameRef.current?.contentWindow as (Window & {
+        WoditorGameSettings?: {
+          hideSideButtons?: boolean;
+          isFullscreen?: boolean;
+          isPseudoFullscreen?: boolean;
+        };
+        adjustGameUI?: () => void;
+      }) | null;
+      const settings = frameWindow?.WoditorGameSettings;
+      if (frameWindow && settings && typeof frameWindow.adjustGameUI === "function") {
+        settings.hideSideButtons = false;
+        settings.isFullscreen = false;
+        settings.isPseudoFullscreen = false;
+        frameWindow.adjustGameUI();
+        logDiagnostic("info", "wolf-touch-ui.restore", {
+          hideSideButtons: settings.hideSideButtons,
+          isFullscreen: settings.isFullscreen,
+          leftHidden: frameWindow.document.getElementById("screen-left")?.hidden ?? null,
+          rightHidden: frameWindow.document.getElementById("screen-right")?.hidden ?? null,
+        });
+      }
+    } catch (cause) {
+      logDiagnostic("warn", "wolf-touch-ui.restore.failed", {
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+
     const game = library.activeGame;
     if (!game) return;
 

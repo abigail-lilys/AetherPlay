@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useEffect, useState, type CSSProperties, type RefObject } from "react";
 import { playUrl } from "@/src/lib/playerUrls";
 import { exportDiagnosticsTxt, logDiagnostic } from "@/src/lib/diagnostics";
 import type { GameRecord } from "@/src/lib/types";
@@ -9,87 +9,14 @@ import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/l
 const githubUrl = "https://github.com/popupie/mv-mz-browser-player";
 const SCREEN_ORIENTATION_KEY = "local-web-game-player-screen-orientation-v1";
 
-type VirtualKeyCode = "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Enter" | "Escape" | "Shift";
-const VIRTUAL_KEY_DETAILS: Record<VirtualKeyCode, { key: string; code: string }> = {
-  ArrowUp: { key: "ArrowUp", code: "ArrowUp" },
-  ArrowDown: { key: "ArrowDown", code: "ArrowDown" },
-  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft" },
-  ArrowRight: { key: "ArrowRight", code: "ArrowRight" },
-  Enter: { key: "Enter", code: "Enter" },
-  Escape: { key: "Escape", code: "Escape" },
-  Shift: { key: "Shift", code: "ShiftLeft" },
-};
-
 function readScreenOrientation(): GameScreenOrientation {
   try {
-    return localStorage.getItem(SCREEN_ORIENTATION_KEY) === "portrait" ? "portrait" : "landscape";
+    return localStorage.getItem("local-web-game-player-screen-orientation-v1") === "portrait"
+      ? "portrait"
+      : "landscape";
   } catch {
     return "landscape";
   }
-}
-
-function dispatchVirtualKey(
-  frameRef: RefObject<HTMLIFrameElement | null>,
-  code: VirtualKeyCode,
-  pressed: boolean,
-): void {
-  const frameWindow = frameRef.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
-  if (!frameWindow) return;
-  try {
-    const target = frameWindow.document.querySelector("canvas, #canvas")
-      ?? frameWindow.document.activeElement
-      ?? frameWindow.document.body;
-    if (!target) return;
-    const detail = VIRTUAL_KEY_DETAILS[code];
-    const event = new frameWindow.KeyboardEvent(pressed ? "keydown" : "keyup", {
-      key: detail.key,
-      code: detail.code,
-      bubbles: true,
-      cancelable: true,
-      repeat: false,
-    });
-    target.dispatchEvent(event);
-    if (pressed) frameWindow.focus();
-  } catch (cause) {
-    logDiagnostic("warn", "virtual-control.dispatch.failed", {
-      code,
-      pressed,
-      error: cause instanceof Error ? cause.message : String(cause),
-    });
-  }
-}
-
-interface VirtualKeyButtonProps {
-  label: string;
-  code: VirtualKeyCode;
-  frameRef: RefObject<HTMLIFrameElement | null>;
-}
-
-function VirtualKeyButton({ label, code, frameRef }: VirtualKeyButtonProps) {
-  const onDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    event.preventDefault();
-    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* pointer capture is optional */ }
-    dispatchVirtualKey(frameRef, code, true);
-  };
-  const onUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    dispatchVirtualKey(frameRef, code, false);
-  };
-  return (
-    <button
-      type="button"
-      className="virtual-key-button"
-      aria-label={label}
-      title={label}
-      onContextMenu={(event) => event.preventDefault()}
-      onPointerDown={onDown}
-      onPointerUp={onUp}
-      onPointerCancel={onUp}
-    >
-      {label}
-    </button>
-  );
 }
 
 interface PlayerPanelProps {
@@ -135,14 +62,22 @@ export function PlayerPanel({
   const [screenOrientation, setScreenOrientation] = useState<GameScreenOrientation>(readScreenOrientation);
 
   useEffect(() => {
-    try { localStorage.setItem(SCREEN_ORIENTATION_KEY, screenOrientation); } catch { /* storage can be unavailable */ }
-    void setAndroidScreenOrientation(screenOrientation).catch((cause) => {
+    if (activeGame) {
+      try {
+        localStorage.setItem(SCREEN_ORIENTATION_KEY, screenOrientation);
+      } catch {
+        // Storage can be unavailable.
+      }
+    }
+    const targetOrientation: GameScreenOrientation = activeGame ? screenOrientation : "system";
+    void setAndroidScreenOrientation(targetOrientation).catch((cause) => {
       logDiagnostic("error", "screen-orientation.change.failed", {
-        orientation: screenOrientation,
+        orientation: targetOrientation,
+        activeGame: Boolean(activeGame),
         error: cause instanceof Error ? cause.message : String(cause),
       });
     });
-  }, [screenOrientation]);
+  }, [screenOrientation, Boolean(activeGame)]);
 
   return (
     <section
@@ -328,8 +263,8 @@ export function PlayerPanel({
               </button>
               <button
                 type="button"
-                aria-label="Fullscreen"
-                title="Fullscreen"
+                aria-label="切换沉浸模式"
+                title="切换沉浸模式"
                 onClick={onRequestFullscreen}
               >
                 <Icon name="fullscreen" />
@@ -393,17 +328,6 @@ export function PlayerPanel({
               </div>
             )}
             <div className="player-stage">
-              <div className="virtual-control-panel virtual-control-left" aria-label="方向控制">
-                <span className="virtual-key-spacer" aria-hidden="true" />
-                <VirtualKeyButton label="▲" code="ArrowUp" frameRef={frameRef} />
-                <span className="virtual-key-spacer" aria-hidden="true" />
-                <VirtualKeyButton label="◀" code="ArrowLeft" frameRef={frameRef} />
-                <span className="virtual-key-spacer virtual-key-center" aria-hidden="true">●</span>
-                <VirtualKeyButton label="▶" code="ArrowRight" frameRef={frameRef} />
-                <span className="virtual-key-spacer" aria-hidden="true" />
-                <VirtualKeyButton label="▼" code="ArrowDown" frameRef={frameRef} />
-                <span className="virtual-key-spacer" aria-hidden="true" />
-              </div>
               <div
                 ref={frameWrapRef}
                 className="frame-wrap"
@@ -422,11 +346,6 @@ export function PlayerPanel({
                   tabIndex={-1}
                   onLoad={onIframeLoad}
                 />
-              </div>
-              <div className="virtual-control-panel virtual-control-right" aria-label="游戏功能键">
-                <VirtualKeyButton label="Sub" code="Shift" frameRef={frameRef} />
-                <VirtualKeyButton label="Cancel" code="Escape" frameRef={frameRef} />
-                <VirtualKeyButton label="↵" code="Enter" frameRef={frameRef} />
               </div>
             </div>
             {overlayAvailable && (

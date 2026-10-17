@@ -13,13 +13,19 @@ public class AndroidOrientationPlugin extends Plugin {
     @PluginMethod
     public void setOrientation(PluginCall call) {
         String value = call.getString("orientation", "landscape");
-        final boolean portrait;
+        final int requestedOrientation;
+        final String normalizedOrientation;
         if ("portrait".equalsIgnoreCase(value)) {
-            portrait = true;
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+            normalizedOrientation = "portrait";
         } else if ("landscape".equalsIgnoreCase(value)) {
-            portrait = false;
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+            normalizedOrientation = "landscape";
+        } else if ("system".equalsIgnoreCase(value)) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+            normalizedOrientation = "system";
         } else {
-            call.reject("Orientation must be 'portrait' or 'landscape'");
+            call.reject("Orientation must be 'system', 'portrait' or 'landscape'");
             return;
         }
 
@@ -29,11 +35,9 @@ public class AndroidOrientationPlugin extends Plugin {
             return;
         }
         activity.runOnUiThread(() -> {
-            activity.setRequestedOrientation(portrait
-                ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                : ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+            activity.setRequestedOrientation(requestedOrientation);
             JSObject result = new JSObject();
-            result.put("orientation", portrait ? "portrait" : "landscape");
+            result.put("orientation", normalizedOrientation);
             call.resolve(result);
         });
     }

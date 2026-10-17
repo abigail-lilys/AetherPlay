@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AndroidFolderPickerPlugin.class);
         registerPlugin(AndroidOrientationPlugin.class);
+        registerPlugin(AndroidImmersivePlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
