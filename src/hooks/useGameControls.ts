@@ -152,43 +152,74 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
-    // WOLF_TOUCH_UI_RESTORE_PATCH_V2: retry until the game UI exists, lock the flags, and log probes.
+    // WOLF_TOUCH_UI_RESTORE_PATCH_V3: probe the real layout (WoditorGameSettings is a lexical const, read via eval).
     {
-      type WoditorWindow = Window & {
-        WoditorGameSettings?: Record<string, unknown>;
-        adjustGameUI?: () => void;
-      };
+      type FrameWin = Window & { adjustGameUI?: () => void; eval: (code: string) => unknown };
       const frame = player.frameRef.current;
+      const rect = (e: Element | null) => {
+        if (!e) return null;
+        const r = e.getBoundingClientRect();
+        return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+      };
       const probe = (label: string) => {
         try {
-          const w = frame?.contentWindow as WoditorWindow | null;
+          const w = frame?.contentWindow as FrameWin | null;
           const d = w?.document;
-          const box = (id: string) => {
-            const e = d?.getElementById(id);
-            if (!e || !w) return null;
-            const r = e.getBoundingClientRect();
-            return {
-              hidden: e.hidden,
-              display: w.getComputedStyle(e).display,
-              w: Math.round(r.width),
-              h: Math.round(r.height),
-            };
+          if (!w || !d) {
+            logDiagnostic("warn", "wolf-touch-ui.probe", { label, reason: "no-window" });
+            return;
+          }
+          const chain = (id: string) => {
+            const out: unknown[] = [];
+            let e: Element | null = d.getElementById(id);
+            while (e && e !== d.documentElement) {
+              const cs = w.getComputedStyle(e);
+              out.push({
+                id: e.id || e.tagName.toLowerCase(),
+                display: cs.display,
+                vis: cs.visibility,
+                pos: cs.position,
+                w: cs.width,
+                h: cs.height,
+                ov: cs.overflow,
+                rect: rect(e),
+              });
+              e = e.parentElement;
+            }
+            return out;
           };
+          let settings: unknown = null;
+          try {
+            settings = w.eval(
+              "typeof WoditorGameSettings === 'undefined' ? null : JSON.stringify(WoditorGameSettings)",
+            );
+          } catch {
+            settings = "eval-failed";
+          }
+          const suspicious: string[] = [];
+          for (const sheet of Array.from(d.styleSheets)) {
+            try {
+              for (const rule of Array.from(sheet.cssRules)) {
+                const text = rule.cssText;
+                if (
+                  /screen-(side|holder|left|right)|itemh|side-content|#enter|#esc|#shift|move-axis|right-hold/.test(text) &&
+                  /!important|display:\s*none|visibility|width:\s*0|height:\s*0/.test(text)
+                ) {
+                  suspicious.push(text.slice(0, 240));
+                }
+              }
+            } catch {
+              /* cross-origin sheet */
+            }
+          }
           logDiagnostic("info", "wolf-touch-ui.probe", {
             label,
-            href: String(w?.location?.href ?? ""),
-            hasSettings: Boolean(w?.WoditorGameSettings),
-            hasAdjust: typeof w?.adjustGameUI === "function",
-            settings: JSON.stringify(w?.WoditorGameSettings ?? null),
-            inner: [w?.innerWidth ?? 0, w?.innerHeight ?? 0],
-            fullscreenElement: Boolean(d?.fullscreenElement),
-            left: box("screen-left"),
-            right: box("screen-right"),
-            enter: box("enter"),
-            shift: box("shift"),
-            esc: box("esc"),
-            moveAxis: box("move-axis"),
-            rightHold: box("right-hold"),
+            inner: [w.innerWidth, w.innerHeight],
+            settings,
+            styleSheets: d.styleSheets.length,
+            suspicious: suspicious.slice(0, 12),
+            chainLeft: chain("screen-left"),
+            chainEnter: chain("enter"),
           });
         } catch (cause) {
           logDiagnostic("warn", "wolf-touch-ui.probe.failed", {
@@ -197,36 +228,28 @@ export function useGameControls({
           });
         }
       };
-      const restore = () => {
-        const w = frame?.contentWindow as WoditorWindow | null;
-        const s = w?.WoditorGameSettings;
-        if (!w || !s || typeof w.adjustGameUI !== "function") return false;
-        for (const key of ["hideSideButtons", "isFullscreen", "isPseudoFullscreen"]) {
-          try {
-            Object.defineProperty(s, key, {
-              get: () => false,
-              set: () => undefined,
-              configurable: true,
-              enumerable: true,
-            });
-          } catch {
-            Reflect.set(s, key, false);
-          }
+      const experiment = () => {
+        const w = frame?.contentWindow as FrameWin | null;
+        const d = w?.document;
+        if (!w || !d) return;
+        for (const id of ["screen-holder-left", "screen-holder-right"]) {
+          d.getElementById(id)?.style.setProperty("display", "flex", "important");
         }
-        w.adjustGameUI();
-        return true;
+        for (const id of ["screen-left", "screen-right"]) {
+          const e = d.getElementById(id);
+          if (!e) continue;
+          e.style.setProperty("display", "block", "important");
+          e.style.setProperty("width", "100%", "important");
+          e.style.setProperty("height", "100%", "important");
+        }
+        w.adjustGameUI?.();
       };
       probe("iframe-load");
-      let tries = 0;
-      const timer = window.setInterval(() => {
-        tries += 1;
-        const done = restore();
-        if (!done && tries < 40) return;
-        window.clearInterval(timer);
-        probe(done ? "restored" : "gave-up");
-        window.setTimeout(() => probe("after-3s"), 3000);
-        window.setTimeout(() => probe("after-8s"), 8000);
-      }, 250);
+      window.setTimeout(() => probe("after-3s"), 3000);
+      window.setTimeout(() => {
+        experiment();
+        probe("after-experiment");
+      }, 4000);
     }
     const game = library.activeGame;
     if (!game) return;
