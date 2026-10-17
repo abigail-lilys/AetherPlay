@@ -152,35 +152,82 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
-    // WOLF_TOUCH_UI_RESTORE_PATCH: restore the built-in HOLD/DRAG/Sub/Cancel/Enter controls.
-    try {
-      const frameWindow = player.frameRef.current?.contentWindow as (Window & {
-        WoditorGameSettings?: {
-          hideSideButtons?: boolean;
-          isFullscreen?: boolean;
-          isPseudoFullscreen?: boolean;
-        };
+    // WOLF_TOUCH_UI_RESTORE_PATCH_V2: retry until the game UI exists, lock the flags, and log probes.
+    {
+      type WoditorWindow = Window & {
+        WoditorGameSettings?: Record<string, unknown>;
         adjustGameUI?: () => void;
-      }) | null;
-      const settings = frameWindow?.WoditorGameSettings;
-      if (frameWindow && settings && typeof frameWindow.adjustGameUI === "function") {
-        settings.hideSideButtons = false;
-        settings.isFullscreen = false;
-        settings.isPseudoFullscreen = false;
-        frameWindow.adjustGameUI();
-        logDiagnostic("info", "wolf-touch-ui.restore", {
-          hideSideButtons: settings.hideSideButtons,
-          isFullscreen: settings.isFullscreen,
-          leftHidden: frameWindow.document.getElementById("screen-left")?.hidden ?? null,
-          rightHidden: frameWindow.document.getElementById("screen-right")?.hidden ?? null,
-        });
-      }
-    } catch (cause) {
-      logDiagnostic("warn", "wolf-touch-ui.restore.failed", {
-        error: cause instanceof Error ? cause.message : String(cause),
-      });
+      };
+      const frame = player.frameRef.current;
+      const probe = (label: string) => {
+        try {
+          const w = frame?.contentWindow as WoditorWindow | null;
+          const d = w?.document;
+          const box = (id: string) => {
+            const e = d?.getElementById(id);
+            if (!e || !w) return null;
+            const r = e.getBoundingClientRect();
+            return {
+              hidden: e.hidden,
+              display: w.getComputedStyle(e).display,
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            };
+          };
+          logDiagnostic("info", "wolf-touch-ui.probe", {
+            label,
+            href: String(w?.location?.href ?? ""),
+            hasSettings: Boolean(w?.WoditorGameSettings),
+            hasAdjust: typeof w?.adjustGameUI === "function",
+            settings: JSON.stringify(w?.WoditorGameSettings ?? null),
+            inner: [w?.innerWidth ?? 0, w?.innerHeight ?? 0],
+            fullscreenElement: Boolean(d?.fullscreenElement),
+            left: box("screen-left"),
+            right: box("screen-right"),
+            enter: box("enter"),
+            shift: box("shift"),
+            esc: box("esc"),
+            moveAxis: box("move-axis"),
+            rightHold: box("right-hold"),
+          });
+        } catch (cause) {
+          logDiagnostic("warn", "wolf-touch-ui.probe.failed", {
+            label,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      };
+      const restore = () => {
+        const w = frame?.contentWindow as WoditorWindow | null;
+        const s = w?.WoditorGameSettings;
+        if (!w || !s || typeof w.adjustGameUI !== "function") return false;
+        for (const key of ["hideSideButtons", "isFullscreen", "isPseudoFullscreen"]) {
+          try {
+            Object.defineProperty(s, key, {
+              get: () => false,
+              set: () => undefined,
+              configurable: true,
+              enumerable: true,
+            });
+          } catch {
+            Reflect.set(s, key, false);
+          }
+        }
+        w.adjustGameUI();
+        return true;
+      };
+      probe("iframe-load");
+      let tries = 0;
+      const timer = window.setInterval(() => {
+        tries += 1;
+        const done = restore();
+        if (!done && tries < 40) return;
+        window.clearInterval(timer);
+        probe(done ? "restored" : "gave-up");
+        window.setTimeout(() => probe("after-3s"), 3000);
+        window.setTimeout(() => probe("after-8s"), 8000);
+      }, 250);
     }
-
     const game = library.activeGame;
     if (!game) return;
 
