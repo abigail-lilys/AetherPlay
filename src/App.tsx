@@ -1,3 +1,4 @@
+import { Capacitor } from "@capacitor/core";
 import { useRef } from "react";
 import { LibraryPanel } from "@/src/components/LibraryPanel";
 import { PlayerPanel } from "@/src/components/PlayerPanel";
@@ -11,7 +12,7 @@ export default function App() {
   const { library, player } = controller;
 
   return (
-    <main className="app-shell" onKeyDown={controller.onAppKeyDown}>
+    <main className={`app-shell${Capacitor.getPlatform() === "android" ? " android-app" : ""}${library.activeGame ? " has-active-game" : ""}`} onKeyDown={controller.onAppKeyDown}>
       <LibraryPanel
         activeGame={library.activeGame}
         activeGuard={controller.activeDictionaryGuard}
@@ -24,6 +25,10 @@ export default function App() {
         clearStorage={() => void library.clearStorage()}
         downloadSaves={(game) => void library.downloadSaves(game)}
         openFolder={() => {
+          if (Capacitor.getPlatform() === "android") {
+            void library.openLocalFolder();
+            return;
+          }
           if (library.canUseLocalFolderAccess) {
             void library.openLocalFolder();
             return;
@@ -57,6 +62,7 @@ export default function App() {
 
       <PlayerPanel
         activeGame={library.activeGame}
+        onReturnHome={() => void controller.returnHome()}
         focusPlayer={() => void player.focusPlayer()}
         frameRef={player.frameRef}
         frameWrapRef={player.frameWrapRef}

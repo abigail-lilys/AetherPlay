@@ -10,7 +10,7 @@
   "scripts": {
     "build:player-runtime": "node scripts/build-player-runtime.mjs",
     "dev": "node scripts/build-player-runtime.mjs && vite --host 127.0.0.1",
-    "build": "node scripts/build-player-runtime.mjs && tsc -b && vite build",
+    "build": "node scripts/build-player-runtime.mjs && node scripts/patch-wolf-runtime-timeout.mjs && tsc -b && vite build",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1"
   },

@@ -6,6 +6,7 @@ import {
   createOpfsWriter,
   putGame,
   putIndexedDbBlobs,
+  putAndroidFolderHandle,
   putLocalFolderHandle,
   putStoredFiles,
   replaceStoredFilesForGame,
@@ -13,6 +14,7 @@ import {
   type BrowserFileSystemDirectoryHandle,
   type BrowserFileSystemFileHandle,
 } from "@/src/lib/storage";
+import { readAndroidFolderFile, type AndroidFolderChoice } from "@/src/lib/androidFolderPicker";
 import type { GameRecord, ImportCandidate, ImportProgress } from "@/src/lib/types";
 
 type ProgressCallback = (progress: ImportProgress) => void;
@@ -30,6 +32,15 @@ interface LocalFolderCandidate {
 interface SessionFolderCandidate {
   title: string;
   files: Array<{ path: string; file: File; size: number; mime: string }>;
+  entryPath: string;
+  totalBytes: number;
+}
+
+interface AndroidFolderCandidate {
+  title: string;
+  treeUri: string;
+  folderName: string;
+  files: Array<{ path: string; uri: string; size: number; mime: string }>;
   entryPath: string;
   totalBytes: number;
 }
@@ -236,6 +247,45 @@ function candidateTitle(systemTitle: string, paths: string[], fallback: string):
 
   const normalizedFallback = fallback.replace(/\.[^.]+$/, "").trim();
   return normalizedFallback || inferredTitle || FALLBACK_GAME_TITLE;
+}
+
+export async function candidateFromAndroidFolder(
+  folder: AndroidFolderChoice,
+): Promise<AndroidFolderCandidate> {
+  const entries = folder.files
+    .map((entry) => {
+      const path = normalizeStoredPath(entry.relativePath);
+      return {
+        path,
+        uri: entry.uri,
+        size: Math.max(0, entry.size || 0),
+        mime: entry.mimeType || detectMime(path),
+      };
+    })
+    .filter((entry) => entry.path && entry.uri);
+
+  if (entries.length === 0) {
+    throw new Error("The selected folder contains no readable files.");
+  }
+
+  const normalized = stripCommonWrapper(entries);
+  const paths = normalized.map((entry) => entry.path);
+  const readText = async (entry: { uri: string; mime: string }) =>
+    (await readAndroidFolderFile(entry.uri, entry.mime)).text();
+
+  // Only inspect probable manifests and index pages; do not read game assets here.
+  const systemTitle = await titleFromSystemJsonEntries(normalized, readText);
+  const browserGameTitle = await titleFromBrowserGameEntries(normalized, readText);
+  const htmlTitle = await titleFromHtmlEntries(normalized, readText);
+
+  return {
+    title: candidateTitle(systemTitle || browserGameTitle || htmlTitle, paths, folder.folderName),
+    treeUri: folder.treeUri,
+    folderName: folder.folderName,
+    files: normalized,
+    entryPath: findEntryPath(paths),
+    totalBytes: normalized.reduce((sum, entry) => sum + entry.size, 0),
+  };
 }
 
 export async function candidateFromFolder(
@@ -463,6 +513,43 @@ export async function importLocalFolderCandidate(
     fileCount: candidate.files.length,
     totalBytes: candidate.totalBytes,
     sourceKind: "local-folder",
+    settings: defaultPlayerSettings(),
+  };
+
+  await putGame(game);
+  onProgress?.({ phase: "done", label: "Folder linked", completed: candidate.files.length, total: candidate.files.length });
+  return game;
+}
+
+export async function importAndroidFolderCandidate(
+  candidate: AndroidFolderCandidate,
+  onProgress?: ProgressCallback,
+): Promise<GameRecord> {
+  const gameId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  onProgress?.({ phase: "storing", label: "Saving Android folder link", completed: 0, total: candidate.files.length });
+  await putAndroidFolderHandle(gameId, candidate.treeUri, candidate.folderName);
+  await putStoredFiles(
+    candidate.files.map((entry) => ({
+      gameId,
+      path: normalizeStoredPath(entry.path),
+      size: entry.size,
+      mime: entry.mime,
+      storageRef: entry.uri,
+      storageKind: "android-folder",
+    })),
+  );
+
+  const game: GameRecord = {
+    id: gameId,
+    title: candidate.title,
+    createdAt: now,
+    updatedAt: now,
+    entryPath: candidate.entryPath,
+    fileCount: candidate.files.length,
+    totalBytes: candidate.totalBytes,
+    sourceKind: "android-folder",
     settings: defaultPlayerSettings(),
   };
 

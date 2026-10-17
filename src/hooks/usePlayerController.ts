@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { Capacitor } from "@capacitor/core";
+import { diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
+import { getAndroidFolderHandle } from "@/src/lib/storage";
 import {
   createWolfAssetObjectUrls,
   type WolfAssetObjectUrlSet,
@@ -61,17 +64,32 @@ export function usePlayerController() {
     event: MessageEvent<PlayerToParentMessage>,
     message: Extract<PlayerToParentMessage, { type: "wolf-assets-request" }>,
   ) {
+    const requestStartedAt = Date.now();
     const game = library.activeGame;
     if (
       !game ||
       message.gameId !== game.id ||
       event.source !== player.frameRef.current?.contentWindow
     ) {
+      logDiagnostic("warn", "wolf-assets.request.ignored", {
+        requestedGameId: message.gameId,
+        activeGameId: game?.id,
+        hasActiveGame: Boolean(game),
+        frameSourceMatches: event.source === player.frameRef.current?.contentWindow,
+      });
       return;
     }
 
+    logDiagnostic("info", "wolf-assets.request.received", {
+      gameId: game.id, requestId: message.requestId, entryPath: game.entryPath,
+    });
     try {
       const value = await wolfAssetsForActiveGame();
+      logDiagnostic("info", "wolf-assets.response.ready", {
+        gameId: game.id, requestId: message.requestId, assetCount: value.assets.length,
+        bytesInUrls: value.assets.reduce((sum, asset) => sum + asset.size, 0),
+        elapsedMs: Date.now() - requestStartedAt,
+      });
       (event.source as Window).postMessage(
         {
           type: "wolf-assets-response",
@@ -85,6 +103,10 @@ export function usePlayerController() {
         cause instanceof Error
           ? cause.message
           : "Could not prepare WOLF assets.";
+      logDiagnostic("error", "wolf-assets.response.failed", {
+        gameId: message.gameId, requestId: message.requestId,
+        elapsedMs: Date.now() - requestStartedAt, error: diagnosticErrorText(cause),
+      });
       setRuntimeError(error);
       (event.source as Window).postMessage(
         {
@@ -96,6 +118,52 @@ export function usePlayerController() {
       );
     }
   }
+
+  useEffect(() => {
+    installDiagnosticErrorHandlers();
+    logDiagnostic("info", "app.player-controller-mounted", {});
+  }, []);
+
+  useEffect(() => {
+    setRuntimeLogTarget(null);
+    const game = library.activeGame;
+    if (!game || Capacitor.getPlatform() !== "android") return;
+    let cancelled = false;
+
+    void getAndroidFolderHandle(game.id).then((folder) => {
+      if (cancelled) return;
+      if (!folder?.treeUri) {
+        logDiagnostic("warn", "runtime.log.target.unavailable", {
+          gameId: game.id,
+          gameTitle: game.title,
+          entryPath: game.entryPath,
+          reason: "No saved Android folder permission is associated with this game.",
+        });
+        return;
+      }
+      setRuntimeLogTarget({ gameId: game.id, treeUri: folder.treeUri, folderName: folder.folderName });
+      logDiagnostic("info", "runtime.session.start", {
+        gameId: game.id,
+        gameTitle: game.title,
+        entryPath: game.entryPath,
+        gameFolder: folder.folderName,
+        logFile: "runtime.log",
+        maxLogBytes: 524288,
+        singleLogFile: true,
+      });
+    }).catch((cause) => {
+      if (cancelled) return;
+      logDiagnostic("error", "runtime.log.target.lookup-failed", {
+        gameId: game.id,
+        error: diagnosticErrorText(cause),
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      void flushRuntimeLog();
+    };
+  }, [library.activeGame?.id]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<PlayerToParentMessage>) => {
@@ -131,6 +199,7 @@ export function usePlayerController() {
         textLog.append(message.text);
       }
       if (message.type === "runtime-error") {
+        logDiagnostic("error", "player.runtime-error", { gameId: library.activeGame?.id, message: message.message });
         setRuntimeError(message.message);
       }
       if (

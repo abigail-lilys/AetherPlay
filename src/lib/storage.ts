@@ -44,6 +44,12 @@ type LocalFolderHandleRecord = {
   handle: BrowserFileSystemDirectoryHandle;
 };
 
+type AndroidFolderHandleRecord = {
+  gameId: string;
+  treeUri: string;
+  folderName: string;
+};
+
 export function fileKey(gameId: string, path: string): string {
   return `${gameId}\n${normalizeStoredPath(path)}`;
 }
@@ -194,6 +200,36 @@ export async function getLocalFolderHandle(gameId: string): Promise<BrowserFileS
       transaction.objectStore(HANDLE_STORE).get(gameId)
     );
     return record?.handle;
+  } finally {
+    db.close();
+  }
+}
+
+export async function putAndroidFolderHandle(
+  gameId: string,
+  treeUri: string,
+  folderName: string,
+): Promise<void> {
+  const db = await openPlayerDb();
+  try {
+    const transaction = db.transaction(HANDLE_STORE, "readwrite");
+    transaction.objectStore(HANDLE_STORE).put({ gameId, treeUri, folderName } satisfies AndroidFolderHandleRecord);
+    await transactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+export async function getAndroidFolderHandle(
+  gameId: string,
+): Promise<AndroidFolderHandleRecord | undefined> {
+  const db = await openPlayerDb();
+  try {
+    const transaction = db.transaction(HANDLE_STORE, "readonly");
+    const record = await requestToPromise<AndroidFolderHandleRecord | undefined>(
+      transaction.objectStore(HANDLE_STORE).get(gameId),
+    );
+    return record?.treeUri ? record : undefined;
   } finally {
     db.close();
   }

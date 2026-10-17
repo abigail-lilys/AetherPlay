@@ -1,10 +1,14 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { Capacitor } from "@capacitor/core";
+import { chooseAndroidFolder } from "@/src/lib/androidFolderPicker";
 import {
   bindSessionFolderCandidate,
+  candidateFromAndroidFolder,
   candidateFromDirectoryHandle,
   candidateFromFolder,
   candidateFromZip,
   importCandidate,
+  importAndroidFolderCandidate,
   importLocalFolderCandidate,
   importSessionFolderCandidate,
 } from "@/src/lib/importer";
@@ -40,6 +44,7 @@ import {
   deleteGame,
   estimateStorage,
   getAllGames,
+  getAndroidFolderHandle,
   updateGameSettings,
 } from "@/src/lib/storage";
 import {
@@ -180,7 +185,46 @@ export function useGameLibrary(onImportStart?: () => void) {
     }
   }
 
+  async function openAndroidFolder() {
+    setError(null);
+    setNotice(null);
+    onImportStart?.();
+    try {
+      setProgress({
+        phase: "reading",
+        label: "Choose a folder",
+        completed: 0,
+        total: 1,
+      });
+      const chosen = await chooseAndroidFolder();
+      if (chosen.files.length === 0) {
+        throw new Error("The selected folder contains no files.");
+      }
+      setProgress({
+        phase: "reading",
+        label: `Indexing ${chosen.files.length.toLocaleString()} files`,
+        completed: 0,
+        total: chosen.files.length,
+      });
+      await waitForNextPaint();
+      const candidate = await candidateFromAndroidFolder(chosen);
+      const game = await importAndroidFolderCandidate(candidate, setProgress);
+      clearServiceWorkerGameCache(game.id);
+      await refreshGames(game.id);
+      setProgress(idleProgress);
+    } catch (cause) {
+      setProgress(idleProgress);
+      if (cause instanceof Error && /cancelled|canceled/i.test(cause.message)) return;
+      setError(cause instanceof Error ? cause.message : "Folder open failed.");
+    }
+  }
+
+
   async function openLocalFolder() {
+    if (Capacitor.getPlatform() === "android") {
+      await openAndroidFolder();
+      return;
+    }
     const supportError = localFolderAccessError();
     if (supportError) {
       setError(supportError);
@@ -283,6 +327,17 @@ export function useGameLibrary(onImportStart?: () => void) {
         }
       } catch {
         setError("Folder access expired. Open the folder again.");
+        return;
+      }
+    }
+    if (sourceKind === "android-folder") {
+      try {
+        if (!(await getAndroidFolderHandle(game.id))) {
+          setError("Android folder link is missing. Choose the original folder again.");
+          return;
+        }
+      } catch {
+        setError("Could not restore Android folder access. Choose the original folder again.");
         return;
       }
     }

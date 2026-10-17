@@ -1,3 +1,5 @@
+import { readAndroidFolderFile } from "@/src/lib/androidFolderPicker";
+import { diagnosticErrorText, logDiagnostic } from "@/src/lib/diagnostics";
 import { getSessionFolderFile } from "@/src/lib/sessionFiles";
 import {
   getIndexedDbBlobs,
@@ -79,11 +81,25 @@ function localFolderReader(root: BrowserFileSystemDirectoryHandle) {
 }
 
 export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAssetObjectUrlSet> {
-  const records = (await getStoredFilesForGame(gameId)).filter((record) =>
-    isLooseWolfAsset(record.path),
-  );
+  const prepareStartedAt = Date.now();
+  logDiagnostic("info", "wolf-assets.prepare.start", { gameId });
+  const allRecords = await getStoredFilesForGame(gameId);
+  const records = allRecords.filter((record) => isLooseWolfAsset(record.path));
+  const storageKinds = records.reduce<Record<string, number>>((counts, record) => {
+    counts[record.storageKind] = (counts[record.storageKind] || 0) + 1;
+    return counts;
+  }, {});
+  logDiagnostic("info", "wolf-assets.records.ready", {
+    gameId,
+    allFileCount: allRecords.length,
+    looseAssetCount: records.length,
+    looseAssetBytes: records.reduce((sum, record) => sum + record.size, 0),
+    storageKinds,
+  });
   if (records.length === 0) {
-    throw new Error("This WOLF export has no loose Data files.");
+    const error = new Error("This WOLF export has no loose Data files.");
+    logDiagnostic("error", "wolf-assets.no-loose-data", { gameId, allFileCount: allRecords.length });
+    throw error;
   }
 
   const indexedRecords = records.filter((record) => record.storageKind === "indexeddb");
@@ -104,17 +120,58 @@ export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAss
     if (record.storageKind === "session-file") {
       return getSessionFolderFile(gameId, record.storageRef || record.path);
     }
+    if (record.storageKind === "android-folder") {
+      return readAndroidFolderFile(record.storageRef, record.mime);
+    }
     return undefined;
   }
 
   const objectUrls: string[] = [];
+  let completedAssets = 0;
+  let completedBytes = 0;
   try {
+    logDiagnostic("info", "wolf-assets.read.start", {
+      gameId, assetCount: records.length,
+      androidAssetCount: records.filter((record) => record.storageKind === "android-folder").length,
+      concurrency: FILE_READ_CONCURRENCY,
+    });
     const assets = await concurrentMap(records, async (record) => {
-      const blob = await readBlob(record);
-      if (!blob) throw new Error(`Could not read WOLF asset: ${record.path}`);
+      const readStartedAt = Date.now();
+      let blob: Blob | undefined;
+      try {
+        blob = await readBlob(record);
+      } catch (cause) {
+        logDiagnostic("error", "wolf-assets.read.failed", {
+          gameId, path: record.path, storageKind: record.storageKind,
+          elapsedMs: Date.now() - readStartedAt, error: diagnosticErrorText(cause),
+        });
+        throw new Error(`Could not read WOLF asset ${record.path}: ${diagnosticErrorText(cause)}`);
+      }
+      if (!blob) {
+        const error = new Error(`Could not read WOLF asset: ${record.path}`);
+        logDiagnostic("error", "wolf-assets.read.empty", {
+          gameId, path: record.path, storageKind: record.storageKind,
+          elapsedMs: Date.now() - readStartedAt,
+        });
+        throw error;
+      }
+      completedAssets += 1;
+      completedBytes += blob.size;
+      const elapsedMs = Date.now() - readStartedAt;
+      if (completedAssets % 100 === 0) {
+        logDiagnostic("info", "wolf-assets.read.progress", {
+          gameId, completedAssets, assetCount: records.length, completedBytes,
+          lastPath: record.path, lastStorageKind: record.storageKind, lastReadMs: elapsedMs,
+          elapsedTotalMs: Date.now() - prepareStartedAt,
+        });
+      }
       const url = URL.createObjectURL(blob);
       objectUrls.push(url);
       return { path: normalizeStoredPath(record.path), url, size: blob.size };
+    });
+    logDiagnostic("info", "wolf-assets.prepare.complete", {
+      gameId, assetCount: assets.length, bytesRead: completedBytes,
+      elapsedMs: Date.now() - prepareStartedAt,
     });
     return {
       assets,
@@ -125,6 +182,11 @@ export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAss
     };
   } catch (error) {
     for (const url of objectUrls) URL.revokeObjectURL(url);
+    logDiagnostic("error", "wolf-assets.prepare.failed", {
+      gameId, elapsedMs: Date.now() - prepareStartedAt,
+      completedAssets, assetCount: records.length, completedBytes,
+      error: diagnosticErrorText(error),
+    });
     throw error;
   }
 }

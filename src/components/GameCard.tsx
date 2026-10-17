@@ -17,6 +17,8 @@ interface GameCardProps {
 function storageLabel(game: GameRecord, boundSession: boolean): string {
   if (game.sourceKind === "local-folder")
     return "linked folder, no browser storage";
+  if (game.sourceKind === "android-folder")
+    return "linked Android folder, no game copy";
   if (game.sourceKind === "session-folder")
     return boundSession ? "bound" : "not bound";
   return "stored";
@@ -26,6 +28,7 @@ function detailsLabel(game: GameRecord, boundSession: boolean): string {
   const label = storageLabel(game, boundSession);
   if (
     game.sourceKind === "local-folder" ||
+    game.sourceKind === "android-folder" ||
     game.sourceKind === "session-folder"
   ) {
     return `${game.fileCount} files · ${label}`;

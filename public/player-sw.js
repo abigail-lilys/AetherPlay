@@ -619,9 +619,66 @@ async function getSessionFileBlob(gameId, path, requestClientId) {
   return undefined;
 }
 
+function requestAndroidFolderFileFromClient(client, gameId, uri, path, mime) {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const timeout = setTimeout(() => {
+      channel.port1.onmessage = null;
+      resolve(undefined);
+    }, Math.max(SESSION_FILE_TIMEOUT_MS, 60000));
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timeout);
+      channel.port1.onmessage = null;
+      if (event.data && event.data.ok && event.data.file) {
+        resolve(event.data.file);
+        return;
+      }
+      resolve(undefined);
+    };
+    try {
+      client.postMessage(
+        { type: "android-folder-file-request", gameId, uri, path, mime },
+        [channel.port2],
+      );
+    } catch {
+      clearTimeout(timeout);
+      channel.port1.onmessage = null;
+      resolve(undefined);
+    }
+  });
+}
+
+async function getAndroidFolderBlob(gameId, uri, path, mime, requestClientId) {
+  const clientsList = await self.clients.matchAll({
+    type: "window",
+    includeUncontrolled: true,
+  });
+  const appClients = clientsList.filter((client) => !isPlayerClient(client));
+  const fallbackClients = clientsList.filter((client) => isPlayerClient(client));
+  const orderedClients = [
+    ...appClients.filter((client) => client.id === requestClientId),
+    ...appClients.filter((client) => client.id !== requestClientId),
+    ...fallbackClients,
+  ];
+  for (const client of orderedClients) {
+    const blob = await requestAndroidFolderFileFromClient(client, gameId, uri, path, mime);
+    if (blob) return blob;
+  }
+  return undefined;
+}
+
 async function getBlobForStoredRecord(gameId, record, requestClientId) {
   if (record.storageKind === "local-folder") {
     return getLocalFolderBlob(gameId, record.storageRef || record.path);
+  }
+  if (record.storageKind === "android-folder") {
+    return getAndroidFolderBlob(
+      gameId,
+      record.storageRef || record.path,
+      record.path,
+      record.mime || "application/octet-stream",
+      requestClientId,
+    );
   }
   if (record.storageKind === "session-file") {
     return getSessionFileBlob(
