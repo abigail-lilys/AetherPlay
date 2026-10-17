@@ -5,3 +5,13 @@ public/mz-player-runtime/
 .DS_Store
 *.tsbuildinfo
 tests/
+# Android generated files
+android/.gradle/
+android/local.properties
+android/**/build/
+android/.idea/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/

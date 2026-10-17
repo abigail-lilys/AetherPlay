@@ -15,6 +15,8 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
     "buffer": "^6.0.3",
     "crypto-browserify": "^3.12.1",
     "events": "^3.3.0",
@@ -24,10 +26,11 @@
     "stream-browserify": "^3.0.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
+    "@capacitor/cli": "^8.5.3",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
     "esbuild": "^0.28.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
