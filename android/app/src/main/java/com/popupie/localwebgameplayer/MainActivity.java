@@ -10,5 +10,6 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AndroidOrientationPlugin.class);
         registerPlugin(AndroidImmersivePlugin.class);
         super.onCreate(savedInstanceState);
+        this.bridge.setWebViewClient(new GameWebViewClient(this.bridge));
     }
 }

@@ -202,7 +202,7 @@ public class AndroidFolderPickerPlugin extends Plugin {
             Uri logUri = findChildDocument(treeUri, rootId, "runtime.log.txt");
             if (logUri == null) logUri = findChildDocument(treeUri, rootId, "runtime.log");
             if (logUri == null) {
-                logUri = DocumentsContract.createDocument(resolver, parentUri, "text/plain", "runtime.log.txt");
+                logUri = getOrCreateLogUri(getContext(), resolver, parentUri, "runtime.log.txt");
             }
             if (logUri == null) throw new IllegalStateException("Could not create runtime.log.txt in the selected game folder");
 
@@ -278,7 +278,7 @@ public class AndroidFolderPickerPlugin extends Plugin {
         Uri uri = result.getData().getData();
         String content = call.getString("content");
         if (content == null) content = "";
-        try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
+        try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wa")) {
             if (output == null) throw new IllegalStateException("Could not open destination file");
             output.write(content.getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -429,6 +429,41 @@ public class AndroidFolderPickerPlugin extends Plugin {
             output.write(bytes);
             output.flush();
         }
+    }
+
+
+    private Uri getOrCreateLogUri(android.content.Context context, android.content.ContentResolver resolver, Uri parentUri, String fileName) {
+        Uri targetUri = null;
+        try (android.database.Cursor cursor = resolver.query(parentUri, null, null, null, null)) {
+            while (cursor != null && cursor.moveToNext()) {
+                String displayName = cursor.getString(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME));
+                if (fileName.equals(displayName)) {
+                    String documentId = cursor.getString(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID));
+                    targetUri = DocumentsContract.buildDocumentUriUsingTree(parentUri, documentId);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+        if (targetUri == null) {
+            try {
+            targetUri = DocumentsContract.createDocument(resolver, parentUri, "text/plain", fileName);
+        } catch (java.io.FileNotFoundException e) {
+            throw new RuntimeException("Failed to create log file: " + fileName, e);
+        }
+        }
+        
+        // 每次获取时，追加 session 头部
+        if (targetUri != null) {
+            try (java.io.OutputStream os = resolver.openOutputStream(targetUri, "wa")) {
+                String header = "\n---- session " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date()) + " ----\n";
+                os.write(header.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        return targetUri;
     }
 
 }
