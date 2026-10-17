@@ -3,7 +3,6 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { logDiagnostic } from "@/src/lib/diagnostics";
 import { chordFromEvent, sameChord } from "@/src/lib/keyChords";
 import { reservedKeyForEvent } from "@/src/lib/keys";
 import {
@@ -152,86 +151,6 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
-    // WOLF_TOUCH_UI_RESTORE_PATCH_V3: probe the real layout (WoditorGameSettings is a lexical const, read via eval).
-    {
-      type FrameWin = Window & { adjustGameUI?: () => void; eval: (code: string) => unknown };
-      const frame = player.frameRef.current;
-      const rect = (e: Element | null) => {
-        if (!e) return null;
-        const r = e.getBoundingClientRect();
-        return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
-      };
-      const probe = (label: string) => {
-        try {
-          const w = frame?.contentWindow as FrameWin | null;
-          const d = w?.document;
-          if (!w || !d) {
-            logDiagnostic("warn", "wolf-touch-ui.probe", { label, reason: "no-window" });
-            return;
-          }
-          const chain = (id: string) => {
-            const out: unknown[] = [];
-            let e: Element | null = d.getElementById(id);
-            while (e && e !== d.documentElement) {
-              const cs = w.getComputedStyle(e);
-              out.push({
-                id: e.id || e.tagName.toLowerCase(),
-                display: cs.display,
-                vis: cs.visibility,
-                pos: cs.position,
-                w: cs.width,
-                h: cs.height,
-                ov: cs.overflow,
-                rect: rect(e),
-              });
-              e = e.parentElement;
-            }
-            return out;
-          };
-          let settings: unknown = null;
-          try {
-            settings = w.eval(
-              "typeof WoditorGameSettings === 'undefined' ? null : JSON.stringify(WoditorGameSettings)",
-            );
-          } catch {
-            settings = "eval-failed";
-          }
-          const suspicious: string[] = [];
-          for (const sheet of Array.from(d.styleSheets)) {
-            try {
-              for (const rule of Array.from(sheet.cssRules)) {
-                const text = rule.cssText;
-                if (
-                  /screen-(side|holder|left|right)|itemh|side-content|#enter|#esc|#shift|move-axis|right-hold/.test(text) &&
-                  /!important|display:\s*none|visibility|width:\s*0|height:\s*0/.test(text)
-                ) {
-                  suspicious.push(text.slice(0, 240));
-                }
-              }
-            } catch {
-              /* cross-origin sheet */
-            }
-          }
-          logDiagnostic("info", "wolf-touch-ui.probe", {
-            label,
-            inner: [w.innerWidth, w.innerHeight],
-            settings,
-            styleSheets: d.styleSheets.length,
-            suspicious: suspicious.slice(0, 12),
-            chainLeft: chain("screen-left"),
-            chainEnter: chain("enter"),
-          });
-        } catch (cause) {
-          logDiagnostic("warn", "wolf-touch-ui.probe.failed", {
-            label,
-            error: cause instanceof Error ? cause.message : String(cause),
-          });
-        }
-      };
-      probe("iframe-load");
-      window.setTimeout(() => probe("after-3s"), 3000);
-      window.setTimeout(() => probe("after-6s"), 6000);
-    }
     const game = library.activeGame;
     if (!game) return;
 
