@@ -1,3 +1,4 @@
+import { logDiagnostic } from "@/src/lib/diagnostics";
 import {
   useEffect,
   useState,
@@ -151,6 +152,76 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
+    // BENTEN_PROBE: find out why window.Benten is undefined (module script / AudioContext / worklet).
+    {
+      type BentenWin = Window & {
+        eval: (code: string) => unknown;
+        Benten?: unknown;
+        AudioContext?: typeof AudioContext;
+        AudioWorkletNode?: unknown;
+      };
+      const frame = player.frameRef.current;
+      const runBentenProbe = async (label: string) => {
+        try {
+          const w = frame?.contentWindow as BentenWin | null;
+          if (!w) {
+            logDiagnostic("warn", "benten.probe", { label, reason: "no-window" });
+            return;
+          }
+          let importResult = "not-run";
+          try {
+            importResult = String(
+              await (w.eval(
+                "import(new URL('lib/benten_front.js', document.baseURI).href)" +
+                  ".then(function (m) { return 'ok:' + Object.keys(m).join(','); })" +
+                  ".catch(function (e) { return 'error:' + String((e && e.message) || e); })",
+              ) as Promise<string>),
+            );
+          } catch (cause) {
+            importResult = "eval-failed:" + (cause instanceof Error ? cause.message : String(cause));
+          }
+          let audio = "n/a";
+          try {
+            const Ctor = w.AudioContext;
+            if (Ctor) {
+              const ctx = new Ctor({ latencyHint: "balanced", sampleRate: 44100 });
+              audio = "ok:" + ctx.sampleRate + ":" + ctx.state;
+              void ctx.close();
+            }
+          } catch (cause) {
+            audio = "error:" + (cause instanceof Error ? cause.message : String(cause));
+          }
+          const entries = w.performance
+            .getEntriesByType("resource")
+            .filter((entry) => /benten|midisound/.test(entry.name))
+            .map((entry) => {
+              const resource = entry as PerformanceResourceTiming & { responseStatus?: number };
+              return {
+                name: entry.name.split("/lib/")[1] ?? entry.name,
+                status: resource.responseStatus ?? -1,
+                type: resource.initiatorType,
+              };
+            });
+          logDiagnostic("info", "benten.probe", {
+            label,
+            hasBenten: typeof w.Benten,
+            importResult,
+            audio,
+            worklet: typeof w.AudioWorkletNode,
+            entries: JSON.stringify(entries),
+            ua: w.navigator.userAgent,
+          });
+        } catch (cause) {
+          logDiagnostic("warn", "benten.probe.failed", {
+            label,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      };
+      window.setTimeout(() => void runBentenProbe("after-4s"), 4000);
+      window.setTimeout(() => void runBentenProbe("after-10s"), 10000);
+    }
+
     const game = library.activeGame;
     if (!game) return;
 
