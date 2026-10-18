@@ -6,6 +6,7 @@ import {
   type RefObject,
 } from "react";
 import { formatBytes } from "@/src/lib/format";
+import { setAndroidImmersive } from "@/src/lib/androidImmersive";
 import {
   setAndroidScreenOrientation,
   type GameScreenOrientation,
@@ -217,6 +218,7 @@ export function HomeScreen({
 
   useEffect(() => {
     void setAndroidScreenOrientation("system").catch(() => undefined);
+    void setAndroidImmersive(false).catch(() => undefined);
   }, []);
 
   useEffect(() => {

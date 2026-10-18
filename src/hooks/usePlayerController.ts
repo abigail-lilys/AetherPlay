@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
 import { getAndroidFolderHandle } from "@/src/lib/storage";
+import { clearZipArchiveCache } from "@/src/lib/playerCache";
 import {
   createWolfAssetObjectUrls,
   type WolfAssetObjectUrlSet,
@@ -123,6 +124,10 @@ export function usePlayerController() {
     installDiagnosticErrorHandlers();
     logDiagnostic("info", "app.player-controller-mounted", {});
   }, []);
+
+  useEffect(() => {
+    return () => clearZipArchiveCache();
+  }, [library.activeGame?.id]);
 
   useEffect(() => {
     void player.setImmersiveMode(Boolean(library.activeGame)).catch((cause) => {

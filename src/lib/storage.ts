@@ -1,6 +1,6 @@
 import { detectMime } from "@/src/lib/mime";
 import { normalizeStoredPath } from "@/src/lib/paths";
-import type { GameRecord, StoredGameFile } from "@/src/lib/types";
+import type { GameRecord, StoredGameFile, ZipArchiveFileEntry } from "@/src/lib/types";
 
 const DB_NAME = "mvmz-browser-player";
 const DB_VERSION = 2;
@@ -139,6 +139,7 @@ export async function deleteGame(gameId: string): Promise<void> {
       if (!cursor) return;
       const record = cursor.value as StoredGameFile & { key: string };
       transaction.objectStore(BLOB_STORE).delete(record.key);
+      if (record.storageKind === "zip-archive") transaction.objectStore(BLOB_STORE).delete(record.storageRef);
       cursor.delete();
       cursor.continue();
     };
@@ -306,6 +307,7 @@ export async function replaceStoredFilesForGame(
 
       const record = cursor.value as StoredGameFile & { key: string };
       blobStore.delete(record.key);
+      if (record.storageKind === "zip-archive") blobStore.delete(record.storageRef);
       cursor.delete();
       cursor.continue();
     };
@@ -356,6 +358,39 @@ export async function putIndexedDbBlobs(records: Array<{ gameId: string; path: s
     const { key: _key, ...record } = fileRecord;
     return record;
   });
+}
+
+/** Persist a ZIP once and index its members without expanding them to persistent storage. */
+export async function putZipArchive(
+  gameId: string,
+  archive: Blob,
+  entries: ZipArchiveFileEntry[],
+): Promise<StoredGameFile[]> {
+  const archiveRef = `zip-archive:${gameId}`;
+  const records = entries.map((entry) => {
+    const normalizedPath = normalizeStoredPath(entry.path);
+    return {
+      key: fileKey(gameId, normalizedPath),
+      gameId,
+      path: normalizedPath,
+      size: Math.max(0, entry.size || 0),
+      mime: entry.mime || detectMime(normalizedPath),
+      storageRef: archiveRef,
+      storageKind: "zip-archive" as const,
+      archiveEntryPath: entry.archiveEntryPath,
+    };
+  });
+  const db = await openPlayerDb();
+  try {
+    const transaction = db.transaction([BLOB_STORE, FILE_STORE], "readwrite");
+    transaction.objectStore(BLOB_STORE).put({ key: archiveRef, blob: archive } satisfies StoredBlobRecord);
+    const fileStore = transaction.objectStore(FILE_STORE);
+    for (const record of records) fileStore.put(record);
+    await transactionDone(transaction);
+  } finally {
+    db.close();
+  }
+  return records.map(({ key: _key, ...record }) => record);
 }
 
 function getOpfsRoot(): Promise<BrowserFileSystemDirectoryHandle> | undefined {

@@ -19,12 +19,58 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
 import java.io.OutputStream;
 import java.util.Arrays;
 
 @CapacitorPlugin(name = "AndroidFolderPicker")
 public class AndroidFolderPickerPlugin extends Plugin {
+    // REGISTERED_GAME_ASSETS_PATCH: one active game's metadata; no asset bytes are cached here.
+    static final class RegisteredGameAsset {
+        final String uri;
+        final String mime;
+        RegisteredGameAsset(String uri, String mime) {
+            this.uri = uri;
+            this.mime = mime;
+        }
+    }
+    private static final class GameAssetRegistry {
+        final String gameId;
+        final Map<String, RegisteredGameAsset> assets;
+        GameAssetRegistry(String gameId, Map<String, RegisteredGameAsset> assets) {
+            this.gameId = gameId;
+            this.assets = assets;
+        }
+    }
+    private static volatile GameAssetRegistry activeGameAssetRegistry =
+        new GameAssetRegistry("", Collections.emptyMap());
+
+    static RegisteredGameAsset findRegisteredGameAsset(String gameId, String path) {
+        GameAssetRegistry registry = activeGameAssetRegistry;
+        if (gameId == null || !gameId.equals(registry.gameId)) return null;
+        String normalized = normalizeGameAssetPath(path);
+        return normalized == null ? null : registry.assets.get(normalized);
+    }
+
+    private static String normalizeGameAssetPath(String path) {
+        if (path == null) return null;
+        String value = path.replace('\\', '/');
+        if (value.startsWith("/")) return null;
+        StringBuilder normalized = new StringBuilder();
+        for (String part : value.split("/")) {
+            if (part.isEmpty() || ".".equals(part)) continue;
+            if ("..".equals(part)) return null;
+            if (normalized.length() > 0) normalized.append('/');
+            normalized.append(part);
+        }
+        return normalized.length() == 0 ? null : normalized.toString();
+    }
+
     private static final int MAX_RUNTIME_LOG_BYTES = 512 * 1024;
     @PluginMethod
     public void pickDirectory(PluginCall call) {
@@ -148,6 +194,49 @@ public class AndroidFolderPickerPlugin extends Plugin {
                 item.put("size", cursor.isNull(3) ? 0 : cursor.getLong(3));
                 files.put(item);
             }
+        }
+    }
+
+    @PluginMethod
+    public void registerGameAssets(PluginCall call) {
+        String gameId = call.getString("gameId");
+        JSONArray files = call.getData().optJSONArray("files");
+        if (gameId == null || gameId.isEmpty() || files == null) {
+            call.reject("Missing game ID or asset list");
+            return;
+        }
+        try {
+            Boolean appendValue = call.getBoolean("append");
+            GameAssetRegistry current = activeGameAssetRegistry;
+            Map<String, RegisteredGameAsset> next = Boolean.TRUE.equals(appendValue)
+                    && gameId.equals(current.gameId)
+                ? new HashMap<>(current.assets)
+                : new HashMap<>();
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject item = files.optJSONObject(i);
+                if (item == null) continue;
+                String path = normalizeGameAssetPath(item.optString("path", ""));
+                String uriValue = item.optString("uri", "");
+                String mime = item.optString("mime", "application/octet-stream");
+                if (path == null || uriValue.isEmpty()) continue;
+                Uri uri = Uri.parse(uriValue);
+                // Only URIs granted by Android's document picker are accepted.
+                if (!"content".equals(uri.getScheme())) continue;
+                if (mime == null || mime.isEmpty()) mime = "application/octet-stream";
+                next.put(path, new RegisteredGameAsset(uriValue, mime));
+            }
+            if (next.isEmpty()) {
+                call.reject("No valid Android game asset URIs were registered");
+                return;
+            }
+            activeGameAssetRegistry = new GameAssetRegistry(
+                gameId, Collections.unmodifiableMap(next)
+            );
+            JSObject response = new JSObject();
+            response.put("registeredCount", next.size());
+            call.resolve(response);
+        } catch (Exception error) {
+            call.reject("Could not register Android game assets: " + error.getMessage(), error);
         }
     }
 

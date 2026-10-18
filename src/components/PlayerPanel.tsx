@@ -5,6 +5,7 @@ import type { GameRecord } from "@/src/lib/types";
 import { Icon } from "@/src/components/Icon";
 import { TextLogPanel } from "@/src/components/TextLogPanel";
 import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/lib/androidOrientation";
+import { setAndroidImmersive } from "@/src/lib/androidImmersive";
 
 const githubUrl = "https://github.com/popupie/mv-mz-browser-player";
 const SCREEN_ORIENTATION_KEY = "local-web-game-player-screen-orientation-v1";
@@ -77,6 +78,18 @@ export function PlayerPanel({
       });
     });
   }, [screenOrientation, Boolean(activeGame)]);
+
+  useEffect(() => {
+    if (!activeGame) return;
+    void setAndroidImmersive(true).catch((cause) => {
+      logDiagnostic("error", "immersive.enter.failed", {
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    });
+    return () => {
+      void setAndroidImmersive(false).catch(() => undefined);
+    };
+  }, [Boolean(activeGame)]);
 
   return (
     <section

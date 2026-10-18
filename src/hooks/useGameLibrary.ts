@@ -295,7 +295,7 @@ export function useGameLibrary(onImportStart?: () => void) {
       });
       await waitForNextPaint();
       const candidate = await readCandidate();
-      const storageError = await browserStorageError(candidate.totalBytes);
+      const storageError = await browserStorageError(candidate.zipArchive?.size ?? candidate.totalBytes);
       if (storageError) throw new Error(storageError);
       const game = await importCandidate(candidate, setProgress);
       clearServiceWorkerGameCache(game.id);

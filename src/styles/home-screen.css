@@ -10,7 +10,7 @@
   padding-right: env(safe-area-inset-right, 0px);
 }
 
-.lib2-root button {
+:where(.lib2-root) button {
   font: inherit;
   color: inherit;
   background: none;
@@ -22,9 +22,7 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-.lib2-root h1,
-.lib2-root h2,
-.lib2-root p {
+:where(.lib2-root) :where(h1, h2, p) {
   margin: 0;
 }
 
@@ -346,4 +344,65 @@
   border-radius: 12px;
   background: #0f172a;
   text-align: center;
+}
+
+/* ===== game view: no toolbar bar, floating settings button ===== */
+.app-shell.android-app.has-active-game,
+.app-shell.android-app.has-active-game .player-panel,
+.app-shell.android-app.has-active-game .player-scroll {
+  background: #000 !important;
+}
+
+.app-shell.android-app.has-active-game .player-panel {
+  position: relative;
+}
+
+.app-shell.android-app.has-active-game .player-toolbar {
+  position: absolute !important;
+  top: calc(env(safe-area-inset-top, 0px) + 6px);
+  left: calc(env(safe-area-inset-left, 0px) + 6px);
+  right: auto;
+  z-index: 40;
+  display: block !important;
+  width: auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.app-shell.android-app.has-active-game .player-toolbar > div:first-child {
+  display: none !important;
+}
+
+.app-shell.android-app.has-active-game .tool-buttons {
+  display: block !important;
+}
+
+.app-shell.android-app.has-active-game .tool-buttons > button:not(.game-settings-button) {
+  display: none !important;
+}
+
+.app-shell.android-app.has-active-game .tool-buttons .game-settings-button {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: auto !important;
+  min-width: 0 !important;
+  height: 32px !important;
+  min-height: 0 !important;
+  padding: 0 12px !important;
+  border: 1px solid rgba(255, 255, 255, 0.35) !important;
+  border-radius: 999px !important;
+  background: rgba(15, 23, 42, 0.55) !important;
+  color: #fff !important;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.app-shell.android-app.has-active-game .game-settings-menu {
+  left: 0 !important;
+  right: auto !important;
+  top: calc(100% + 6px) !important;
 }

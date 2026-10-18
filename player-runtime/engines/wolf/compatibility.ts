@@ -76,8 +76,7 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
     html.mz-player-browser-woditor #screen-holder-left,
     html.mz-player-browser-woditor #screen-holder-right,
     html.mz-player-browser-woditor #main-header,
-    html.mz-player-browser-woditor #main-footer,
-    html.mz-player-browser-woditor #settings {
+    html.mz-player-browser-woditor #main-footer {
       display: none !important;
     }
 

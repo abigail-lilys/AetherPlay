@@ -1,4 +1,3 @@
-import JSZip from "jszip";
 import { defaultPlayerSettings } from "@/src/lib/defaults";
 import { detectMime } from "@/src/lib/mime";
 import { findEntryPath, normalizeStoredPath, stripCommonWrapper, titleFromEntry } from "@/src/lib/paths";
@@ -6,6 +5,7 @@ import {
   createOpfsWriter,
   putGame,
   putIndexedDbBlobs,
+  putZipArchive,
   putAndroidFolderHandle,
   putLocalFolderHandle,
   putStoredFiles,
@@ -15,7 +15,8 @@ import {
   type BrowserFileSystemFileHandle,
 } from "@/src/lib/storage";
 import { readAndroidFolderFile, type AndroidFolderChoice } from "@/src/lib/androidFolderPicker";
-import type { GameRecord, ImportCandidate, ImportProgress } from "@/src/lib/types";
+import type { GameRecord, ImportCandidate, ImportProgress, ZipArchiveFileEntry } from "@/src/lib/types";
+import { loadZipArchive } from "@/src/lib/zipArchive";
 
 type ProgressCallback = (progress: ImportProgress) => void;
 const PROGRESS_FILE_STEP = 25;
@@ -63,19 +64,6 @@ const PROJECT_ROOT_PATH_SUFFIXES = [
 ];
 const STRUCTURAL_FOLDER_TITLES = new Set(["www"]);
 
-function zipNameBytes(bytes: string[] | Uint8Array | Buffer): Uint8Array {
-  if (bytes instanceof Uint8Array) return bytes;
-  return Uint8Array.from(bytes.map((byte) => (typeof byte === "string" ? byte.charCodeAt(0) : byte)));
-}
-
-function decodeZipFileName(bytes: string[] | Uint8Array | Buffer): string {
-  const data = zipNameBytes(bytes);
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    return new TextDecoder("shift_jis", { fatal: true }).decode(data);
-  }
-}
 
 function shouldReportProgress(index: number, total: number, lastReportTime: number): boolean {
   return index === total || index % PROGRESS_FILE_STEP === 0 || performance.now() - lastReportTime > 160;
@@ -173,35 +161,34 @@ async function titleFromHtmlEntries<T extends { path: string }>(
   return "";
 }
 
-async function unpackArchiveFiles(
+async function indexArchiveEntries(
   archive: Blob,
   label: string,
   onProgress?: ProgressCallback,
-): Promise<Array<{ path: string; file: Blob }>> {
+): Promise<{ zip: Awaited<ReturnType<typeof loadZipArchive>>; entries: ZipArchiveFileEntry[] }> {
   onProgress?.({ phase: "reading", label: `Opening ${label}`, completed: 0, total: archive.size });
-  const archiveData = typeof archive.arrayBuffer === "function" ? await archive.arrayBuffer() : archive;
-  const zip = await JSZip.loadAsync(archiveData, { decodeFileName: decodeZipFileName });
+  const zip = await loadZipArchive(archive);
   const zipEntries = Object.values(zip.files).filter((entry) => !entry.dir);
-  const files: Array<{ path: string; file: Blob }> = [];
+  const entries: ZipArchiveFileEntry[] = [];
   let lastReportTime = performance.now();
 
   for (let index = 0; index < zipEntries.length; index += 1) {
     const entry = zipEntries[index];
     const path = normalizeStoredPath(entry.name);
     if (path) {
-      const blob = await entry.async("blob");
-      files.push({
-        path,
-        file: new Blob([blob], { type: detectMime(path) }),
-      });
+      // JSZip reads uncompressedSize from the ZIP central directory; no asset payload is decompressed here.
+      const zipData = (entry as unknown as { _data?: { uncompressedSize?: unknown } })._data;
+      const rawSize = zipData?.uncompressedSize;
+      const size = typeof rawSize === "number" && Number.isFinite(rawSize) && rawSize >= 0 ? rawSize : 0;
+      entries.push({ path, archiveEntryPath: entry.name, size, mime: detectMime(path) });
     }
     if (shouldReportProgress(index + 1, zipEntries.length, lastReportTime)) {
       lastReportTime = performance.now();
-      onProgress?.({ phase: "reading", label: `Unpacking ${label}`, completed: index + 1, total: zipEntries.length });
+      onProgress?.({ phase: "reading", label: `Indexing ${label}`, completed: index + 1, total: zipEntries.length });
+      await yieldToBrowser();
     }
   }
-
-  return stripCommonWrapper(files);
+  return { zip, entries: stripCommonWrapper(entries) };
 }
 
 function projectFolderTitleFromPath(path: string): string {
@@ -412,17 +399,24 @@ export async function candidateFromDirectoryHandle(
 }
 
 export async function candidateFromZip(file: File, onProgress?: ProgressCallback): Promise<ImportCandidate> {
-  const normalized = await unpackArchiveFiles(file, "ZIP", onProgress);
+  const { zip, entries: normalized } = await indexArchiveEntries(file, "ZIP", onProgress);
   const paths = normalized.map((entry) => entry.path);
-  const systemTitle = await titleFromSystemJsonEntries(normalized, (entry) => entry.file.text());
-  const browserGameTitle = await titleFromBrowserGameEntries(normalized, (entry) => entry.file.text());
-  const htmlTitle = await titleFromHtmlEntries(normalized, (entry) => entry.file.text());
+  const readText = async (entry: ZipArchiveFileEntry) => {
+    const zipEntry = zip.file(entry.archiveEntryPath);
+    return zipEntry && !zipEntry.dir ? zipEntry.async("string") : "";
+  };
+  const systemTitle = await titleFromSystemJsonEntries(normalized, readText);
+  const browserGameTitle = await titleFromBrowserGameEntries(normalized, readText);
+  const htmlTitle = await titleFromHtmlEntries(normalized, readText);
 
   return {
     title: candidateTitle(systemTitle || browserGameTitle || htmlTitle, paths, file.name),
-    files: normalized,
+    // ZIP payloads are intentionally not expanded into per-file Blob objects.
+    files: [],
     entryPath: findEntryPath(paths),
-    totalBytes: normalized.reduce((sum, entry) => sum + entry.file.size, 0)
+    totalBytes: normalized.reduce((sum, entry) => sum + entry.size, 0),
+    zipArchive: file,
+    zipArchiveEntries: normalized,
   };
 }
 
@@ -433,9 +427,14 @@ export async function importCandidate(candidate: ImportCandidate, onProgress?: P
   let totalBytes = 0;
   let lastReportTime = performance.now();
 
-  onProgress?.({ phase: "storing", label: "Preparing browser storage", completed: 0, total: candidate.files.length });
-
-  if (useOpfs) {
+  const zipEntries = candidate.zipArchiveEntries;
+  const fileCount = zipEntries?.length ?? candidate.files.length;
+  onProgress?.({ phase: "storing", label: "Preparing browser storage", completed: 0, total: fileCount });
+  if (candidate.zipArchive && zipEntries) {
+    await putZipArchive(gameId, candidate.zipArchive, zipEntries);
+    totalBytes = candidate.totalBytes;
+    onProgress?.({ phase: "storing", label: "Saving compressed ZIP archive", completed: fileCount, total: fileCount });
+  } else if (useOpfs) {
     const writer = await createOpfsWriter(gameId);
     const records = [];
     for (let index = 0; index < candidate.files.length; index += 1) {
@@ -472,14 +471,14 @@ export async function importCandidate(candidate: ImportCandidate, onProgress?: P
     createdAt: now,
     updatedAt: now,
     entryPath: candidate.entryPath,
-    fileCount: candidate.files.length,
+    fileCount,
     totalBytes,
     sourceKind: "stored",
     settings: defaultPlayerSettings()
   };
 
   await putGame(game);
-  onProgress?.({ phase: "done", label: "Imported", completed: candidate.files.length, total: candidate.files.length });
+  onProgress?.({ phase: "done", label: "Imported", completed: fileCount, total: fileCount });
   return game;
 }
 

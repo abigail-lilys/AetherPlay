@@ -46,7 +46,7 @@ export interface GameRecord {
   settings: PlayerSettings;
 }
 
-export type StorageKind = "opfs" | "indexeddb" | "local-folder" | "session-file" | "android-folder";
+export type StorageKind = "opfs" | "indexeddb" | "local-folder" | "session-file" | "android-folder" | "zip-archive";
 
 export interface StoredGameFile {
   gameId: string;
@@ -55,6 +55,7 @@ export interface StoredGameFile {
   mime: string;
   storageRef: string;
   storageKind: StorageKind;
+  archiveEntryPath?: string;
 }
 
 export interface ImportProgress {
@@ -87,9 +88,21 @@ export type ParentToPlayerMessage =
       error?: string;
     };
 
+export interface ZipArchiveFileEntry {
+  /** Virtual path exposed to the game after wrapper-folder normalization. */
+  path: string;
+  /** Exact entry name inside the source ZIP. */
+  archiveEntryPath: string;
+  /** Uncompressed size reported by the ZIP central directory. */
+  size: number;
+  mime: string;
+}
 export interface ImportCandidate {
   title: string;
   files: Array<{ path: string; file: Blob }>;
   entryPath: string;
   totalBytes: number;
+  /** Present only for ZIP imports; archive contents are extracted on demand. */
+  zipArchive?: Blob;
+  zipArchiveEntries?: ZipArchiveFileEntry[];
 }

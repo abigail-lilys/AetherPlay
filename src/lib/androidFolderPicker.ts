@@ -17,6 +17,7 @@ interface AndroidFolderPickerAPI {
   pickDirectory(): Promise<{ treeUri: string; folderName: string }>;
   listFiles(options: { treeUri: string }): Promise<{ files: AndroidFolderFile[] }>;
   readFile(options: { uri: string }): Promise<{ data: string }>;
+  registerGameAssets(options: { gameId: string; append: boolean; files: Array<{ path: string; uri: string; mime: string }> }): Promise<{ registeredCount: number }>;
   appendRuntimeLog(options: { treeUri: string; content: string }): Promise<{ uri: string; trimmed: boolean; bytesWritten: number }>;
   exportTextFile(options: { filename: string; content: string }): Promise<{ uri: string }>;
 }
@@ -56,4 +57,23 @@ export async function appendAndroidRuntimeLog(
 export async function saveAndroidTextFile(filename: string, content: string): Promise<string> {
   const result = await picker.exportTextFile({ filename, content });
   return result.uri;
+}
+
+
+/** Register only asset metadata in Android. File bytes are streamed by WebViewClient on demand. */
+export async function registerAndroidGameAssets(
+  gameId: string,
+  files: Array<{ path: string; uri: string; mime: string }>,
+): Promise<number> {
+  const batchSize = 250;
+  let registeredCount = 0;
+  for (let start = 0; start < files.length; start += batchSize) {
+    const result = await picker.registerGameAssets({
+      gameId,
+      append: start > 0,
+      files: files.slice(start, start + batchSize),
+    });
+    registeredCount = result.registeredCount;
+  }
+  return registeredCount;
 }
