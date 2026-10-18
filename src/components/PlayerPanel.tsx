@@ -11,9 +11,8 @@ const SCREEN_ORIENTATION_KEY = "local-web-game-player-screen-orientation-v1";
 
 function readScreenOrientation(): GameScreenOrientation {
   try {
-    return localStorage.getItem("local-web-game-player-screen-orientation-v1") === "portrait"
-      ? "portrait"
-      : "landscape";
+    const stored = localStorage.getItem("local-web-game-player-screen-orientation-v1");
+    return stored === "portrait" || stored === "system" ? stored : "landscape";
   } catch {
     return "landscape";
   }
@@ -286,6 +285,7 @@ export function PlayerPanel({
                 <div className="orientation-options">
                   <button type="button" aria-pressed={screenOrientation === "landscape"} onClick={() => setScreenOrientation("landscape")}>横屏（默认）</button>
                   <button type="button" aria-pressed={screenOrientation === "portrait"} onClick={() => setScreenOrientation("portrait")}>竖屏</button>
+                  <button type="button" aria-pressed={screenOrientation === "system"} onClick={() => setScreenOrientation("system")}>跟随系统</button>
                 </div>
                 <button
                   type="button"

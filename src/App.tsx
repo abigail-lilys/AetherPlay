@@ -1,5 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import { useRef } from "react";
+import { HomeScreen } from "@/src/components/HomeScreen";
 import { LibraryPanel } from "@/src/components/LibraryPanel";
 import { PlayerPanel } from "@/src/components/PlayerPanel";
 import { usePlayerController } from "@/src/hooks/usePlayerController";
@@ -10,6 +11,42 @@ export default function App() {
   const zipInputRef = useRef<HTMLInputElement>(null);
   const controller = usePlayerController();
   const { library, player } = controller;
+
+  if (!library.activeGame) {
+    return (
+      <HomeScreen
+        boundSessionGameIds={library.boundSessionGameIds}
+        clearStorage={() => void library.clearStorage()}
+        directoryInputRef={directoryInputRef}
+        downloadSaves={(game) => void library.downloadSaves(game)}
+        error={library.error}
+        games={library.games}
+        importFolder={library.importFolder}
+        importZip={library.importZip}
+        notice={library.notice}
+        openFolder={() => {
+          if (Capacitor.getPlatform() === "android") {
+            void library.openLocalFolder();
+            return;
+          }
+          if (library.canUseLocalFolderAccess) {
+            void library.openLocalFolder();
+            return;
+          }
+          directoryInputRef.current?.click();
+        }}
+        progress={library.progress}
+        quotaPercent={controller.quotaPercent}
+        removeGame={(game) => void library.removeGame(game)}
+        bindSessionFolder={(game) => void library.bindSessionFolder(game)}
+        resetError={() => library.setError(null)}
+        resetNotice={() => library.setNotice(null)}
+        selectGame={(gameId) => void controller.selectGame(gameId)}
+        storage={library.storage}
+        zipInputRef={zipInputRef}
+      />
+    );
+  }
 
   return (
     <main className={`app-shell${Capacitor.getPlatform() === "android" ? " android-app" : ""}${library.activeGame ? " has-active-game" : ""}`} onKeyDown={controller.onAppKeyDown}>
