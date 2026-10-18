@@ -359,7 +359,9 @@
 
 .app-shell.android-app.has-active-game .player-toolbar {
   position: absolute !important;
-  top: calc(env(safe-area-inset-top, 0px) + 6px);
+  /* SETTINGS_AT_BOTTOM：想放到底部正中，把下面 left 改成 50%，并给按钮加 transform: translateX(-50%) */
+  top: auto;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 6px);
   left: calc(env(safe-area-inset-left, 0px) + 6px);
   right: auto;
   z-index: 40;
@@ -404,5 +406,8 @@
 .app-shell.android-app.has-active-game .game-settings-menu {
   left: 0 !important;
   right: auto !important;
-  top: calc(100% + 6px) !important;
+  top: auto !important;
+  bottom: calc(100% + 6px) !important;
+  max-height: calc(100dvh - 64px);
+  overflow-y: auto;
 }
