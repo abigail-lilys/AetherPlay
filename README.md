@@ -1,239 +1,56 @@
-# Local Web Game Player
+# AetherPlay
 
-Local Web Game Player runs compatible local HTML game exports directly in your
-browser. It supports RPG Maker MV/MZ, WOLF RPG, TyranoScript, Construct 2 NW.js, and
-Cocos Creator games. You can open a local
-game folder or import a ZIP, then play without uploading game files to a
-server.
+> 沉浸式本地网页游戏运行器，为 WOLF RPG 等引擎提供纯净体验。
 
-## Demo
+**AetherPlay** 是一款专为运行本地网页游戏（如 WOLF RPG 引擎游戏）而打造的高性能 Android 播放器。它彻底打破了传统浏览器运行游戏的束缚，为你提供纯净、无干扰的沉浸式体验。
 
-https://github.com/user-attachments/assets/56beacfb-855d-4bdf-87a2-8c388e0cc9b1
+本项目基于 [popupie/local-web-game-player](https://github.com/popupie/local-web-game-player) 开发，原项目作者为 popupie 及贡献者。我们在其基础上针对移动端进行了深度定制与重构。
 
-## Use Case
+## 核心特性
 
-Many RPG Maker, WOLF RPG, TyranoScript, Construct 2, and Cocos Creator games are
-distributed as desktop applications. This app is useful when playing web
-exports on Linux or macOS through a browser.
+- **纯净去白边**：告别浏览器环境，彻底解决画面裁切与多余边栏问题。
+- **原生级触控**：深度优化移动端触控体验，支持无缝方向键拖拽、自定义 UI 布局。
+- **沉浸式适配**：自动适配横屏与竖屏，智能隐藏系统状态栏，带来真正的全屏沉浸体验。
+- **极速与安全**：全本地离线运行，无需联网，游戏存档与隐私数据安全保留在你的设备中。
+- **悬浮胶囊**：内置便捷的悬浮设置与日志导出按钮，随叫随到，不打扰游戏画面。
 
-It can also help with language study. The text overlay makes game text easier to
-select with browser tools such as the Yomitan extension. Yomitan is a separate
-project and is not included with this app.
+载入你的游戏压缩包，让 AetherPlay 为你开启纯粹的冒险之旅。
 
-## Feature Support
+## 开发
 
-| Engine          | Compatible input                                                                            | Overlay                                | Text log                                              | Save backup                                                | Engine-specific support                                                         |
-| --------------- | ------------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| RPG Maker MV/MZ | Web export or extracted NW.js game, as a folder or ZIP                                      | Yes, for canvas text                   | Yes, for messages, choices, names, and scrolling text | Yes, for browser saves and emulated desktop save files     | Standard encrypted image/audio assets and common NW.js/Node APIs                |
-| WOLF RPG        | `wolftools` web export containing `index.html`, `asset_manifest.json`, and extracted assets | No                                     | No                                                    | No player-managed save ZIP                                 | Browser Woditor playback, lazy asset loading, canvas sizing, and input handling |
-| TyranoScript    | Web export or extracted desktop game, as a folder or ZIP                                    | Yes, for HTML dialogue and choices     | Yes                                                   | Yes, when saves use browser storage                        | Desktop file-save configuration is redirected to browser storage                |
-| Construct 2     | Web export or extracted `package.nw`, as a folder or ZIP                                    | Yes, for Text and SpriteFont objects   | Yes                                                   | Yes, when saves use browser or emulated filesystem storage | Common NW.js/Node APIs                                                          |
-| Cocos Creator   | Web export or extracted Electron app, as a folder or ZIP                                    | Yes, for Label and RichText components | Yes                                                   | Yes, when saves use browser or emulated filesystem storage | Common Electron/Node APIs                                                       |
+    pnpm install
+    pnpm build
+    pnpm exec cap sync android
+    cd android && ./gradlew assembleDebug
 
-Compatibility can still vary when a game or plugin relies
-on an API that the browser player does not emulate.
+## 致谢与许可 / Acknowledgements & License
 
-## App Flow
+AetherPlay 的诞生离不开上游优秀开源项目的支持：
 
-1. Open the app in your browser.
-2. Open a folder for a large game, or import a ZIP for a smaller portable game.
-3. Make sure the folder or ZIP contains game `index.html`.
-4. Wait while the app scans the folder or imports the ZIP.
-5. Select the game from the library.
-6. If a session folder says `not bound`, select it and choose the
-   same folder again.
-7. Play the game in the player area.
-8. Use Focus if the game does not receive keyboard input.
-9. Use Fullscreen when you want a larger play view.
-10. Use Overlay to collect game text in a readable text log.
-11. Use Show to make overlay text visible on top of the game.
-12. Use Guard to stop chosen keys from going into the game.
-13. Download saves from the library when you want to export save data.
+- [local-web-game-player](https://github.com/popupie/local-web-game-player) by popupie — 提供了坚实且极具扩展性的底层 Web 游戏运行环境。
 
-## Web Export Examples
+### License
 
-A compatible web export has an `index.html` entry point and all of the assets
-needed by the game. RPG Maker MV/MZ exports usually contain folders such as
-`js`, `img`, `audio`, and `data`.
+The original [local-web-game-player](https://github.com/popupie/local-web-game-player) is licensed under the **MIT License**.
+AetherPlay's own modifications, UI enhancements, and additions are also released under the **MIT License**.
 
-Some games keep these files inside a `www` folder:
-
-```text
-GameFolder/
-  www/
-    index.html
-    js/
-    img/
-    audio/
-    data/
-```
-
-Other games use a flatter layout, often next to files such as `game.exe`:
-
-```text
-GameFolder/
-  game.exe
-  index.html
-  js/
-  img/
-  audio/
-  data/
-```
-
-TyranoScript exports commonly use this layout:
-
-```text
-GameFolder/
-  index.html
-  tyrano/
-  data/
-```
-
-WOLF RPG games need a web export produced by [wolftools](https://github.com/popupie/wolftools).
-Open the exported folder that contains `index.html`, `asset_manifest.json`, and the extracted game
-assets. The player loads those assets individually as the game requests them.
-
-Construct 2 NW.js exports commonly use this layout:
-
-```text
-GameFolder/
-  index.html
-  c2runtime.js
-  data.js
-  images/
-  media/
-```
-
-Cocos Creator web exports commonly use this layout, sometimes nested in an
-Electron application's `resources` directory:
-
-```text
-GameFolder/
-  index.html
-  application.js
-  cocos-js/
-  src/
-  assets/
-```
-
-Desktop wrapper files such as Electron's `main.js`, `package.json`, and
-`node_modules` are not needed for browser playback. The player automatically
-uses browser storage for TyranoScript exports that were configured for desktop
-file saves.
-
-## Extracting Packaged Desktop Games
-
-Extraction does not guarantee browser compatibility. Games that depend on
-unsupported Electron or Node.js APIs may still fail. Password-encrypted archives
-and DRM-protected packages are not supported. Standard RPG Maker MV/MZ encrypted
-image and audio assets are supported when the export includes a usable
-encryption key.
-
-### NW.js games packaged as `package.nw`
-
-The player does not extract `package.nw` automatically. A typical Construct 2
-`package.nw` is a ZIP archive, so extract it into a new folder with an archive
-tool or the command line:
-
-```sh
-unzip "/path/to/package.nw" -d "./nw_extract"
-```
-
-Open the extracted folder that directly contains `index.html`. Construct 2
-exports normally also contain `c2runtime.js` and `data.js`. The player serves
-the extracted images, audio, scripts, and other assets as separate files when
-the game requests them; it does not load `package.nw` as one large asset.
-
-### Electron games packaged as `app.asar`
-
-Electron can bundle an application's source files into `app.asar`. The archive
-is usually inside `Game.app/Contents/Resources` on macOS or the game's
-`resources` folder on Windows. Packaged Linux applications commonly use the
-same `resources` folder layout.
-
-Extract the archive into a new folder without modifying the installed game:
-
-```sh
-pnpm dlx @electron/asar extract "/path/to/resources/app.asar" "./electron_extract"
-```
-
-The current [official `@electron/asar` CLI](https://github.com/electron/asar)
-requires Node.js 22.12 or newer.
-
-If `app.asar.unpacked` exists, copy its contents into the extracted folder while
-preserving its subdirectories. Then find the folder containing a compatible web
-entry point. For TyranoScript, look for `index.html`, `tyrano`, and `data`. For
-RPG Maker MV or MZ, look for `index.html`, `js`, and `data`, sometimes inside a
-`www` folder. Open that folder in Local Web Game Player.
-
-### Games distributed as a packaged executable
-
-Enigma Virtual Box can bundle a game's files into its Windows executable. The
-[official `evbunpack` project](https://github.com/mos9527/evbunpack) provides a
-command-line tool and prebuilt Windows releases for extracting these files.
-
-Extract the executable into a new folder without modifying the original game:
-
-```sh
-evbunpack "/path/to/Game.exe" "./evb_extract"
-```
-
-In the extracted folder, look for the same web entry point and supporting
-folders described above. The game files may be nested inside one or more
-subdirectories; open the folder that directly contains `index.html`.
-
-## Desktop API Compatibility
-
-For extracted RPG Maker and NW.js games, the player provides
-compatibility layers for common `path`, `fs`, `process`, `os`, `Buffer`,
-`events`, `stream`, `util`, `url`, `querystring`, `assert`, `timers`,
-`child_process`, NW.js, and Electron calls. CommonJS modules can be loaded from
-the game folder or `node_modules`, including packages that use a
-`package.json` `main` or string `browser` entry.
-
-## Local Setup
-
-Install dependencies:
-
-```sh
-pnpm install
-```
-
-Start the development server:
-
-```sh
-pnpm run dev
-```
-
-Build the app:
-
-```sh
-pnpm run build
-```
-
-Preview the production build:
-
-```sh
-pnpm run preview
-```
-
-## Privacy
-
-The app is built for your own local game files. This project does not provide
-game files. Nothing is uploaded by this app or stored on a server.
-
-This is a backendless static web app. It does not need a server database or user
-accounts.
-
-Your browser may still limit or clear storage based on its own settings. Export
-your saves when you want to keep a backup outside the browser.
-
-ZIP imports are stored in browser storage. Folder opens may be persistent when
-the browser supports folder handles, or session-only when it only supports the
-older folder picker.
-
-## Notes
-
-This is an unofficial player for user provided web game exports. It is not
-affiliated with or endorsed by Gotcha Gotcha Games, KADOKAWA, Degica, SmokingWOLF,
-or the TyranoScript project.
+> Copyright (c) 2025 popupie (Original Project)
+> Copyright (c) 2025 AetherPlay Contributors
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
