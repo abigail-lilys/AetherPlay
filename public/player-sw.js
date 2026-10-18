@@ -667,6 +667,50 @@ async function getAndroidFolderBlob(gameId, uri, path, mime, requestClientId) {
   return undefined;
 }
 
+function requestZipArchiveFileFromClient(client, gameId, storageRef, archiveEntryPath, path, mime) {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const timeout = setTimeout(() => {
+      channel.port1.onmessage = null;
+      resolve(undefined);
+    }, Math.max(SESSION_FILE_TIMEOUT_MS, 60000));
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timeout);
+      channel.port1.onmessage = null;
+      if (event.data && event.data.ok && event.data.file) {
+        resolve(event.data.file);
+        return;
+      }
+      resolve(undefined);
+    };
+    try {
+      client.postMessage(
+        { type: "zip-archive-file-request", gameId, storageRef, archiveEntryPath, path, mime },
+        [channel.port2],
+      );
+    } catch {
+      clearTimeout(timeout);
+      channel.port1.onmessage = null;
+      resolve(undefined);
+    }
+  });
+}
+async function getZipArchiveEntryBlob(gameId, storageRef, archiveEntryPath, path, mime, requestClientId) {
+  const clientsList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const appClients = clientsList.filter((client) => !isPlayerClient(client));
+  const fallbackClients = clientsList.filter((client) => isPlayerClient(client));
+  const orderedClients = [
+    ...appClients.filter((client) => client.id === requestClientId),
+    ...appClients.filter((client) => client.id !== requestClientId),
+    ...fallbackClients,
+  ];
+  for (const client of orderedClients) {
+    const blob = await requestZipArchiveFileFromClient(client, gameId, storageRef, archiveEntryPath, path, mime);
+    if (blob) return blob;
+  }
+  return undefined;
+}
+
 async function getBlobForStoredRecord(gameId, record, requestClientId) {
   if (record.storageKind === "local-folder") {
     return getLocalFolderBlob(gameId, record.storageRef || record.path);
@@ -684,6 +728,16 @@ async function getBlobForStoredRecord(gameId, record, requestClientId) {
     return getSessionFileBlob(
       gameId,
       record.storageRef || record.path,
+      requestClientId,
+    );
+  }
+  if (record.storageKind === "zip-archive") {
+    return getZipArchiveEntryBlob(
+      gameId,
+      record.storageRef,
+      record.archiveEntryPath || record.path,
+      record.path,
+      record.mime || "application/octet-stream",
       requestClientId,
     );
   }

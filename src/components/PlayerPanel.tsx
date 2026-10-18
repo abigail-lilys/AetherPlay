@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties, type RefObject } from "react";
 import { playUrl } from "@/src/lib/playerUrls";
-import { exportDiagnosticsTxt, logDiagnostic } from "@/src/lib/diagnostics";
+import { logDiagnostic } from "@/src/lib/diagnostics";
 import type { GameRecord } from "@/src/lib/types";
 import { Icon } from "@/src/components/Icon";
 import { TextLogPanel } from "@/src/components/TextLogPanel";
@@ -311,25 +311,10 @@ export function PlayerPanel({
             )}
           </div>
           <div className="player-scroll">
+            
             {runtimeError && (
               <div className="runtime-error dismissible-alert">
                 <span>{runtimeError}</span>
-                <button
-                  type="button"
-                  className="diagnostic-export-button"
-                  onClick={() => {
-                    void exportDiagnosticsTxt().then(
-                      () => window.alert("诊断日志 TXT 已保存。"),
-                      (cause) => {
-                        logDiagnostic("error", "diagnostics.export.failed", { error: cause instanceof Error ? cause.message : String(cause) });
-                        window.alert(`导出日志失败：${cause instanceof Error ? cause.message : String(cause)}`);
-                      },
-                    );
-                  }}
-                >
-                  导出诊断日志 TXT
-                </button>
-
                 <button
                   type="button"
                   aria-label="Dismiss error"

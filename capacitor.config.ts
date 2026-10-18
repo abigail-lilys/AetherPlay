@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.popupie.localwebgameplayer',
-  appName: 'Local Web Game Player',
+  appId: "com.aetherplay.app",
+  appName: "AetherPlay",
   webDir: 'dist',
 };
 

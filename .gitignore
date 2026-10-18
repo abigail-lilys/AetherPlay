@@ -17,3 +17,5 @@ android/.externalNativeBuild/
 android/.cxx/
 
 .backup-*/
+*.sh
+*.bak*

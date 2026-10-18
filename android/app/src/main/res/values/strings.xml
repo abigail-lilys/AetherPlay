@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Local Web Game Player</string>
+    <string name="app_name">AetherPlay</string>
     <string name="title_activity_main">Local Web Game Player</string>
     <string name="package_name">com.popupie.localwebgameplayer</string>
     <string name="custom_url_scheme">com.popupie.localwebgameplayer</string>

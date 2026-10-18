@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
-import { diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
+import { exportDiagnosticsTxt, diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
 import { getAndroidFolderHandle } from "@/src/lib/storage";
 import { clearZipArchiveCache } from "@/src/lib/playerCache";
 import {
@@ -190,6 +190,25 @@ export function usePlayerController() {
       }
 
       const message = event.data;
+      if (message.type === "export-diagnostics") {
+        const exportingGame = library.activeGame;
+        if (!exportingGame || event.source !== player.frameRef.current?.contentWindow) return;
+        void exportDiagnosticsTxt().then(
+          () => logDiagnostic("info", "diagnostics.export.completed", {
+            gameId: exportingGame.id,
+            gameTitle: exportingGame.title,
+          }),
+          (cause) => {
+            const error = cause instanceof Error ? cause.message : String(cause);
+            logDiagnostic("error", "diagnostics.export.failed", {
+              gameId: exportingGame.id,
+              error,
+            });
+            window.alert(`导出日志失败：${error}`);
+          },
+        );
+        return;
+      }
       if (message.type === "wolf-assets-request") {
         void respondWithWolfAssets(event, message);
         return;

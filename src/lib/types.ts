@@ -71,6 +71,7 @@ export type PlayerToParentMessage =
   | { type: "overlay-status"; overlayEnabled: boolean; readerMode: boolean }
   | { type: "game-viewport"; width: number; height: number }
   | { type: "return-focus" }
+  | { type: "export-diagnostics" }
   | { type: "text-log"; gameId: string; text: string; at: number }
   | { type: "runtime-error"; message: string; stack?: string }
   | { type: "wolf-assets-request"; gameId: string; requestId: string };
