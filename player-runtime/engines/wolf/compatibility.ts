@@ -115,6 +115,39 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
       order: 3 !important;
     }
 
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #container {
+      display: grid !important;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+      grid-template-rows: minmax(0, 1fr) var(--mz-player-wolf-bottom-height, 0px) !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #screen-holder-main {
+      grid-column: 1 / span 2 !important;
+      grid-row: 1 !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #screen-holder-left,
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #screen-holder-right {
+      display: flex !important;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      height: 100% !important;
+      min-width: 0 !important;
+      min-height: 0 !important;
+      margin: 0 !important;
+      padding: 2px !important;
+      overflow: hidden !important;
+      grid-row: 2 !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #screen-holder-left {
+      grid-column: 1 !important;
+    }
+
+    html.mz-player-browser-woditor.mz-player-wolf-bottom #screen-holder-right {
+      grid-column: 2 !important;
+    }
+
     html.mz-player-browser-woditor #main {
       position: relative !important;
       top: 0 !important;
@@ -156,21 +189,40 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
 
   const WOLF_SIDE_MIN = 96;
   const WOLF_SIDE_MAX = 240;
+  const WOLF_BOTTOM_MIN = 140; // CSS px needed below the canvas for the portrait panels
 
-  function wolfSideWidth(canvas: HTMLCanvasElement, fullWidth: number, fullHeight: number): number {
-    if (readWolfGameSettings()?.hideSideButtons) return 0;
-    if (!document.getElementById("screen-holder-left")) return 0;
-    if (!document.getElementById("screen-holder-right")) return 0;
-    if (fullWidth / fullHeight < 3.5 / 4) return 0;
+  type WolfSideLayout = { mode: "none" | "sides" | "bottom"; side: number; bottom: number };
+  const WOLF_NO_PANELS: WolfSideLayout = { mode: "none", side: 0, bottom: 0 };
+
+  function wolfSideLayout(
+    canvas: HTMLCanvasElement,
+    fullWidth: number,
+    fullHeight: number,
+  ): WolfSideLayout {
+    if (readWolfGameSettings()?.hideSideButtons) return WOLF_NO_PANELS;
+    if (!document.getElementById("screen-holder-left")) return WOLF_NO_PANELS;
+    if (!document.getElementById("screen-holder-right")) return WOLF_NO_PANELS;
+    if (fullWidth / fullHeight < 3.5 / 4) {
+      // Portrait: canvas on top at full width, the two panels side by side below it.
+      const canvasHeight = fullWidth * (canvas.height / canvas.width);
+      const bottom = fullHeight - canvasHeight;
+      return bottom >= WOLF_BOTTOM_MIN
+        ? { mode: "bottom", side: 0, bottom: Math.floor(bottom) }
+        : WOLF_NO_PANELS;
+    }
     const free = (fullWidth - canvas.width * (fullHeight / canvas.height)) / 2;
     const side = Math.min(WOLF_SIDE_MAX, Math.max(WOLF_SIDE_MIN, free));
-    return side * 2 > fullWidth * 0.6 ? 0 : Math.round(side);
+    return side * 2 > fullWidth * 0.6
+      ? WOLF_NO_PANELS
+      : { mode: "sides", side: Math.round(side), bottom: 0 };
   }
 
-  function applyWolfSides(side: number) {
+  function applyWolfLayout(layout: WolfSideLayout) {
     const rootElement = document.documentElement;
-    rootElement.classList.toggle("mz-player-wolf-sides", side > 0);
-    rootElement.style.setProperty("--mz-player-wolf-side-width", `${side}px`);
+    rootElement.classList.toggle("mz-player-wolf-sides", layout.mode === "sides");
+    rootElement.classList.toggle("mz-player-wolf-bottom", layout.mode === "bottom");
+    rootElement.style.setProperty("--mz-player-wolf-side-width", `${layout.side}px`);
+    rootElement.style.setProperty("--mz-player-wolf-bottom-height", `${layout.bottom}px`);
   }
 
   function postParent(message: object) {
@@ -180,12 +232,13 @@ export function installWolfCompatibility(options: WolfCompatibilityOptions) {
   function syncCanvasViewport(canvas: HTMLCanvasElement) {
     if (canvas.width <= 0 || canvas.height <= 0) return;
     const fullWidth = document.documentElement.clientWidth || window.innerWidth;
-    const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
-    if (fullWidth <= 0 || viewportHeight <= 0) return;
-    const side = wolfSideWidth(canvas, fullWidth, viewportHeight);
-    applyWolfSides(side);
-    const viewportWidth = fullWidth - side * 2;
-    if (viewportWidth <= 0) return;
+    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
+    if (fullWidth <= 0 || fullHeight <= 0) return;
+    const layout = wolfSideLayout(canvas, fullWidth, fullHeight);
+    applyWolfLayout(layout);
+    const viewportWidth = fullWidth - layout.side * 2;
+    const viewportHeight = fullHeight - layout.bottom;
+    if (viewportWidth <= 0 || viewportHeight <= 0) return;
     const scale = Math.min(viewportWidth / canvas.width, viewportHeight / canvas.height);
     const cssWidth = canvas.width * scale;
     const cssHeight = canvas.height * scale;
