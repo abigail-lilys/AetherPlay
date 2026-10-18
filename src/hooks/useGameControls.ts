@@ -152,6 +152,69 @@ export function useGameControls({
   }
 
   function handleIframeLoad() {
+    // BENTEN_PROBE2: compare how a classic script and the module script are served.
+    {
+      const frame2 = player.frameRef.current;
+      const compareScripts = async (label: string) => {
+        try {
+          const w = frame2?.contentWindow as Window | null;
+          if (!w) return;
+          const describe = async (path: string, init?: RequestInit) => {
+            try {
+              const url = new URL(path, w.document.baseURI).href;
+              const res = await w.fetch(url, init);
+              const text = await res.clone().text();
+              return {
+                path,
+                status: res.status,
+                type: res.type,
+                ct: res.headers.get("content-type"),
+                nosniff: res.headers.get("x-content-type-options"),
+                acao: res.headers.get("access-control-allow-origin"),
+                corp: res.headers.get("cross-origin-resource-policy"),
+                cl: res.headers.get("content-length"),
+                chars: text.length,
+                head: text.slice(0, 50).replace(/\s+/g, " "),
+              };
+            } catch (cause) {
+              return { path, error: cause instanceof Error ? cause.message : String(cause) };
+            }
+          };
+          const results = [
+            await describe("lib/benten_front.js", { mode: "cors" }),
+            await describe("lib/system.js"),
+            await describe("lib/midisound.js", { mode: "cors" }),
+            await describe("lib/benten/benten.js", { mode: "cors" }),
+          ];
+          const tag = await new Promise<string>((resolve) => {
+            try {
+              const script = w.document.createElement("script");
+              script.type = "module";
+              script.src = new URL("lib/benten_front.js?probe=" + Date.now(), w.document.baseURI).href;
+              script.onload = () => resolve("load");
+              script.onerror = () => resolve("error");
+              w.document.head.appendChild(script);
+              window.setTimeout(() => resolve("timeout"), 4000);
+            } catch (cause) {
+              resolve("exception:" + (cause instanceof Error ? cause.message : String(cause)));
+            }
+          });
+          logDiagnostic("info", "benten.probe2", {
+            label,
+            results: JSON.stringify(results),
+            moduleTag: tag,
+            hasBentenAfterTag: typeof (w as unknown as { Benten?: unknown }).Benten,
+          });
+        } catch (cause) {
+          logDiagnostic("warn", "benten.probe2.failed", {
+            label,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      };
+      window.setTimeout(() => void compareScripts("after-5s"), 5000);
+    }
+
     // BENTEN_PROBE: find out why window.Benten is undefined (module script / AudioContext / worklet).
     {
       type BentenWin = Window & {
