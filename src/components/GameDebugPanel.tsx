@@ -195,6 +195,13 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
 
   const saveFile = async () => {
     if (!selectedFile) return;
+    const editedBytes = selectedFile.format === "hex"
+      ? Math.ceil(editorContent.replace(/\s+/g, "").length / 2)
+      : new TextEncoder().encode(editorContent).byteLength;
+    if (editedBytes > MAX_EDITOR_BYTES) {
+      setError("编辑内容超过 256 KiB，已阻止写入。");
+      return;
+    }
     const warning = `即将修改游戏虚拟文件：\n${selectedFile.path}\n\n运行时会先创建原文件备份。若这是存档或关键数据，仍建议先在游戏内另存一份。继续吗？`;
     if (!window.confirm(warning)) return;
     setBusy("正在备份并写入…");

@@ -88,7 +88,7 @@ export function PlayerPanel({
         error: cause instanceof Error ? cause.message : String(cause),
       });
     });
-    const playerPanelContent = () => {
+    return () => {
       void setAndroidImmersive(false).catch(() => undefined);
     };
   }, [Boolean(activeGame)]);
@@ -359,11 +359,6 @@ export function PlayerPanel({
           </div>
         </>
       )}
-    </section>
-  );
-  return (
-    <>
-      {playerPanelContent}
       {activeGame ? (
         <>
           <button
@@ -399,6 +394,6 @@ export function PlayerPanel({
           ) : null}
         </>
       ) : null}
-    </>
+    </section>
   );
 }
