@@ -2,6 +2,5 @@ packages:
   - "."
 
 allowBuilds:
-  '@capawesome/capacitor-nodejs': false
   esbuild: true
   sharp: false
