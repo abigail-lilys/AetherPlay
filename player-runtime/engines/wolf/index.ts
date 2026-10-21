@@ -11,10 +11,13 @@ type WolfAsset = {
   size: number;
 };
 
+type WolfSavedFile = { path: string; data: ArrayBuffer };
 type WolfAssetResponse = {
   type: "wolf-assets-response";
   requestId: string;
   assets?: WolfAsset[];
+  // AETHER_WOLF_SAVE_PERSISTENCE_V1
+  savedFiles?: WolfSavedFile[];
   error?: string;
 };
 
@@ -297,6 +300,43 @@ function aetherDebugEnsureParents(fs: AetherDebugFS, path: string): void {
     if (!fs.analyzePath(current).exists) fs.mkdir(current);
   }
 }
+// AETHER_WOLF_SAVE_PERSISTENCE_V1
+function isPersistentWolfSavePath(pathInput: string): boolean {
+  const path = normalizeWolfPath(pathInput).toLowerCase();
+  if (!path || path.startsWith(".aetherplay-debug-backups/")) return false;
+  if (/\.(?:tmp|temp|bak|backup)$/u.test(path)) return false;
+  return /(^|\/)save(?:s|data)?\//u.test(path)
+    || /(?:^|\/)savedata\d*[^/]*$/u.test(path)
+    || /\.(?:sav|save|wolfsave)$/u.test(path);
+}
+
+function persistWolfSaveFromVirtualFs(pathInput: string): void {
+  const gameId = config?.gameId;
+  const path = normalizeWolfPath(pathInput);
+  if (!gameId || !path || !isPersistentWolfSavePath(path)) return;
+  try {
+    const absolute = `/${path}`;
+    const fs = FS as unknown as {
+      analyzePath(path: string): { exists: boolean };
+      stat(path: string): { size: number; mode: number };
+      readFile(path: string): Uint8Array | string;
+    };
+    if (!fs.analyzePath(absolute).exists) return;
+    const info = fs.stat(absolute);
+    if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") return;
+    if (Math.max(0, Number(info.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) {
+      console.warn(`AetherPlay: WOLF save is over the persistence limit: ${path}`);
+      return;
+    }
+    const bytes = aetherDebugToBytes(fs.readFile(absolute));
+    if (bytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) return;
+    const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    window.parent.postMessage({ type: "wolf-save-written", gameId, path, data }, window.location.origin);
+  } catch (cause) {
+    console.warn(`AetherPlay: could not persist WOLF save ${path}`, cause);
+  }
+}
+
 function aetherDebugImportFile(message: AetherDebugCommand): { path: string; size: number; backupPath?: string } {
   const fs = aetherDebugFs();
   const path = aetherDebugNormalizePath(message.path || "");
@@ -450,7 +490,7 @@ function showStatus(message: string) {
   if (target) target.textContent = message;
 }
 
-function requestAssets(settings: WolfPlayerConfig): Promise<WolfAsset[]> {
+function requestAssets(settings: WolfPlayerConfig): Promise<{ assets: WolfAsset[]; savedFiles: WolfSavedFile[] }> {
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
@@ -476,7 +516,7 @@ function requestAssets(settings: WolfPlayerConfig): Promise<WolfAsset[]> {
         reject(new Error("The browser player did not provide WOLF assets."));
         return;
       }
-      resolve(message.assets);
+      resolve({ assets: message.assets, savedFiles: Array.isArray(message.savedFiles) ? message.savedFiles : [] });
     }
 
     window.addEventListener("message", onMessage);
@@ -488,7 +528,7 @@ function requestAssets(settings: WolfPlayerConfig): Promise<WolfAsset[]> {
   });
 }
 
-function installAssetLoader(assets: WolfAsset[]) {
+function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
   const available = new Map<string, WolfAsset>();
   for (const asset of assets) {
     const path = normalizeWolfPath(asset.path);
@@ -563,17 +603,78 @@ function installAssetLoader(assets: WolfAsset[]) {
 
   runtimeModule.preRun.push((initializedModule) => {
     activeModule = initializedModule ?? runtimeModule;
+    // AETHER_WOLF_SAVE_PERSISTENCE_V1: restore IndexedDB-backed overrides before WOLF starts.
+    const originalWriteFile = FS.writeFile;
+    let restoredCount = 0;
+    for (const save of savedFiles) {
+      const path = normalizeWolfPath(save.path);
+      if (!path || !(save.data instanceof ArrayBuffer) || save.data.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) continue;
+      try {
+        ensureParents(`/${path}`);
+        originalWriteFile.call(FS, `/${path}`, new Uint8Array(save.data));
+        restoredCount += 1;
+      } catch (cause) {
+        console.warn(`AetherPlay: failed to restore WOLF save ${path}`, cause);
+      }
+    }
+    if (restoredCount) console.info(`AetherPlay: restored ${restoredCount} persistent WOLF save file(s).`);
+
     const originalOpen = FS.open;
     const originalStat = FS.stat;
     const originalLstat = FS.lstat;
+    const fsIo = FS as unknown as {
+      close?: (...args: unknown[]) => unknown;
+      rename?: (...args: unknown[]) => unknown;
+      readFile: (path: string) => Uint8Array | string;
+      stat: (path: string) => { size: number; mode: number };
+      analyzePath: (path: string) => { exists: boolean };
+      writeFile: (...args: unknown[]) => unknown;
+    };
+    const originalClose = fsIo.close;
+    const originalRename = fsIo.rename;
+    const saveStreams = new WeakMap<object, string>();
 
     FS.open = function(path, flags) {
       const readOnly = typeof flags === "string"
         ? !/[wa+]/.test(flags)
         : ((flags as number) & 3) === 0;
       if (readOnly) load(path);
-      return originalOpen.apply(FS, arguments as unknown as []);
+      const stream = originalOpen.apply(FS, arguments as unknown as []);
+      if (!readOnly && stream && typeof stream === "object" && isPersistentWolfSavePath(String(path))) {
+        saveStreams.set(stream as object, String(path));
+      }
+      return stream;
     };
+
+    // A write may use either FS.writeFile() or open/write/close. Capturing close
+    // persists the final bytes after the runtime has flushed the save stream.
+    if (typeof originalClose === "function") {
+      fsIo.close = function(stream: unknown) {
+        const path = stream && typeof stream === "object" ? saveStreams.get(stream as object) : undefined;
+        const result = originalClose.apply(FS, arguments as unknown as []);
+        if (path) persistWolfSaveFromVirtualFs(path);
+        return result;
+      };
+    }
+    // Atomic save implementations often write a temporary file, then rename it.
+    if (typeof originalRename === "function") {
+      fsIo.rename = function(oldPath: unknown, newPath: unknown) {
+        void oldPath;
+        const result = originalRename.apply(FS, arguments as unknown as []);
+        if (typeof newPath === "string" && isPersistentWolfSavePath(newPath)) persistWolfSaveFromVirtualFs(newPath);
+        return result;
+      };
+    }
+    // Some Emscripten builds implement FS.writeFile without public open/close;
+    // retain a fallback only when close interception is unavailable.
+    if (typeof originalClose !== "function") {
+      const originalWriteFileForPersistence = fsIo.writeFile;
+      fsIo.writeFile = function(path: unknown, ...args: unknown[]) {
+        const result = originalWriteFileForPersistence.apply(FS, [path, ...args]);
+        if (typeof path === "string" && isPersistentWolfSavePath(path)) persistWolfSaveFromVirtualFs(path);
+        return result;
+      };
+    }
     FS.stat = function(path) {
       load(path);
       return originalStat.apply(FS, arguments as unknown as []);
@@ -616,8 +717,8 @@ async function start() {
       throw new Error("The WOLF loose-asset runtime script is missing.");
     }
     showStatus("Preparing WOLF assets");
-    const assets = await requestAssets(config);
-    installAssetLoader(assets);
+    const response = await requestAssets(config);
+    installAssetLoader(response.assets, response.savedFiles);
     await loadWoditor(config.woditorSrc);
   }
 }

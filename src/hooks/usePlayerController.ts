@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { exportDiagnosticsTxt, diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
-import { getAndroidFolderHandle } from "@/src/lib/storage";
+import { getAndroidFolderHandle, getWolfSaveBlobs, putWolfSaveBlob } from "@/src/lib/storage"; // AETHER_WOLF_SAVE_PERSISTENCE_V1
 import { clearZipArchiveCache } from "@/src/lib/playerCache";
 import {
   createWolfAssetObjectUrls,
@@ -86,6 +86,18 @@ export function usePlayerController() {
     });
     try {
       const value = await wolfAssetsForActiveGame();
+      // AETHER_WOLF_SAVE_PERSISTENCE_V1: restore user saves on every runtime launch.
+      let savedFiles: Array<{ path: string; data: ArrayBuffer }> = [];
+      try {
+        const persistedSaves = await getWolfSaveBlobs(game.id);
+        savedFiles = await Promise.all(persistedSaves.map(async (save) => ({
+          path: save.path,
+          data: await save.blob.arrayBuffer(),
+        })));
+      } catch (cause) {
+        // Save storage failure must not prevent the original game from starting.
+        logDiagnostic("error", "wolf.save.restore.read-failed", { gameId: game.id, error: diagnosticErrorText(cause) });
+      }
       logDiagnostic("info", "wolf-assets.response.ready", {
         gameId: game.id, requestId: message.requestId, assetCount: value.assets.length,
         bytesInUrls: value.assets.reduce((sum, asset) => sum + asset.size, 0),
@@ -93,9 +105,10 @@ export function usePlayerController() {
       });
       (event.source as Window).postMessage(
         {
-          type: "wolf-assets-response",
+        type: "wolf-assets-response",
           requestId: message.requestId,
           assets: value.assets,
+          savedFiles,
         },
         window.location.origin,
       );
@@ -190,6 +203,20 @@ export function usePlayerController() {
       }
 
       const message = event.data;
+      // AETHER_WOLF_SAVE_PERSISTENCE_V1: store WOLF saves outside the volatile WASM FS.
+      if (message.type === "wolf-save-written") {
+        const activeGame = library.activeGame;
+        if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
+        if (!(message.data instanceof ArrayBuffer) || message.data.byteLength > 16 * 1024 * 1024) {
+          logDiagnostic("warn", "wolf.save.persist.rejected", { gameId: message.gameId, path: message.path, bytes: message.data?.byteLength });
+          return;
+        }
+        void putWolfSaveBlob(message.gameId, message.path, new Blob([message.data], { type: "application/octet-stream" })).then(
+          () => logDiagnostic("info", "wolf.save.persisted", { gameId: message.gameId, path: message.path, bytes: message.data.byteLength }),
+          (cause) => logDiagnostic("error", "wolf.save.persist.failed", { gameId: message.gameId, path: message.path, error: diagnosticErrorText(cause) }),
+        );
+        return;
+      }
       if (message.type === "export-diagnostics") {
         const exportingGame = library.activeGame;
         if (!exportingGame || event.source !== player.frameRef.current?.contentWindow) return;

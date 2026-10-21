@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { Capacitor } from "@capacitor/core";
 import { saveAndroidBinaryFile, pickAndroidBinaryFile } from "@/src/lib/androidFolderPicker";
+import { putWolfSaveBlob } from "@/src/lib/storage"; // AETHER_WOLF_SAVE_PERSISTENCE_V1
 
 type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "export-file" | "import-file";
 type DebugTab = "overview" | "files" | "memory";
@@ -94,6 +95,14 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+// AETHER_WOLF_SAVE_PERSISTENCE_V1: retain imported binary bytes outside the runtime.
+function blobFromBase64(value: string): Blob {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: "application/octet-stream" });
 }
 function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
@@ -261,6 +270,8 @@ ${targetPath}
       }
       setBusy(`正在导入 ${filename}…`);
       const response = await request("import-file", { path: targetPath, filename, data: picked.data });
+      // AETHER_WOLF_SAVE_PERSISTENCE_V1: import is not successful until durable storage commits.
+      await putWolfSaveBlob(gameId, targetPath, blobFromBase64(picked.data));
       const listing = await request("list-files", { path: currentPath });
       setCurrentPath(listing.path || currentPath);
       setEntries(listing.entries || []);
