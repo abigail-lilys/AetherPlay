@@ -379,6 +379,113 @@ public class AndroidFolderPickerPlugin extends Plugin {
         }
     }
 
+    // AETHER_WOLF_BINARY_EXPORT
+    @PluginMethod
+    public void exportBinaryFile(PluginCall call) {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        String filename = call.getString("filename");
+        if (filename == null || filename.trim().isEmpty()) filename = "game-save.sav";
+        intent.putExtra(Intent.EXTRA_TITLE, filename);
+        startActivityForResult(call, intent, "runtimeBinaryFileCreated");
+    }
+
+    @ActivityCallback
+    private void runtimeBinaryFileCreated(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result == null || result.getResultCode() != Activity.RESULT_OK
+                || result.getData() == null || result.getData().getData() == null) {
+            call.reject("Save export cancelled", "CANCELLED");
+            return;
+        }
+
+        String encoded = call.getString("data");
+        if (encoded == null || encoded.isEmpty()) {
+            call.reject("Missing binary file data");
+            return;
+        }
+        // Bound the native bridge payload to 16 MiB of decoded file data.
+        if (encoded.length() > 22_369_624) {
+            call.reject("File exceeds the 16 MiB export limit");
+            return;
+        }
+
+        Uri uri = result.getData().getData();
+        try {
+            byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+            if (bytes.length > 16 * 1024 * 1024) {
+                call.reject("File exceeds the 16 MiB export limit");
+                return;
+            }
+            try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
+                if (output == null) throw new IllegalStateException("Could not open destination file");
+                output.write(bytes);
+                output.flush();
+            }
+            JSObject response = new JSObject();
+            response.put("uri", uri.toString());
+            response.put("bytesWritten", bytes.length);
+            call.resolve(response);
+        } catch (Exception error) {
+            call.reject("Could not export save file: " + error.getMessage(), error);
+        }
+    }
+
+    // AETHER_WOLF_BINARY_IMPORT
+    @PluginMethod
+    public void importBinaryFile(PluginCall call) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(call, intent, "runtimeBinaryFileSelected");
+    }
+
+    @ActivityCallback
+    private void runtimeBinaryFileSelected(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result == null || result.getResultCode() != Activity.RESULT_OK
+                || result.getData() == null || result.getData().getData() == null) {
+            call.reject("Save import cancelled", "CANCELLED");
+            return;
+        }
+
+        Uri uri = result.getData().getData();
+        String filename = "imported-save.sav";
+        try (Cursor cursor = getContext().getContentResolver().query(
+                uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                if (name != null && !name.trim().isEmpty()) filename = name;
+            }
+        } catch (Exception ignored) {
+            // Use the fallback filename if a document provider hides metadata.
+        }
+
+        try (InputStream input = getContext().getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) throw new IllegalStateException("Cannot open selected save file");
+            byte[] buffer = new byte[65536];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (output.size() + count > 16 * 1024 * 1024) {
+                    call.reject("Save file exceeds the 16 MiB import limit");
+                    return;
+                }
+                output.write(buffer, 0, count);
+            }
+            byte[] bytes = output.toByteArray();
+            JSObject response = new JSObject();
+            response.put("filename", filename);
+            response.put("size", bytes.length);
+            response.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+            call.resolve(response);
+        } catch (Exception error) {
+            call.reject("Could not read selected save file: " + error.getMessage(), error);
+        }
+    }
+
     // RUNTIME_LOG_DEDUP_PATCH
     private static final class RuntimeLogDocument {
         final Uri uri;

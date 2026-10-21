@@ -20,6 +20,8 @@ interface AndroidFolderPickerAPI {
   registerGameAssets(options: { gameId: string; append: boolean; files: Array<{ path: string; uri: string; mime: string }> }): Promise<{ registeredCount: number }>;
   appendRuntimeLog(options: { treeUri: string; content: string }): Promise<{ uri: string; trimmed: boolean; bytesWritten: number }>;
   exportTextFile(options: { filename: string; content: string }): Promise<{ uri: string }>;
+  exportBinaryFile(options: { filename: string; data: string }): Promise<{ uri: string }>;
+  importBinaryFile(): Promise<{ filename: string; size: number; data: string }>;
 }
 
 const picker = registerPlugin<AndroidFolderPickerAPI>("AndroidFolderPicker");
@@ -57,6 +59,19 @@ export async function appendAndroidRuntimeLog(
 export async function saveAndroidTextFile(filename: string, content: string): Promise<string> {
   const result = await picker.exportTextFile({ filename, content });
   return result.uri;
+}
+
+// AETHER_WOLF_BINARY_EXPORT
+/** Export exact binary bytes using Android's system Save As picker (base64 input). */
+export async function saveAndroidBinaryFile(filename: string, data: string): Promise<string> {
+  const result = await picker.exportBinaryFile({ filename, data });
+  return result.uri;
+}
+
+// AETHER_WOLF_BINARY_IMPORT
+/** Pick a local file via Android's document picker and retain its original bytes as base64. */
+export async function pickAndroidBinaryFile(): Promise<{ filename: string; size: number; data: string }> {
+  return picker.importBinaryFile();
 }
 
 

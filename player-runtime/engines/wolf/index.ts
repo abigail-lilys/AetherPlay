@@ -48,10 +48,13 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "list-files" | "read-file" | "write-file";
+  command: "probe" | "list-files" | "read-file" | "write-file" | "export-file" | "import-file";
   path?: string;
   format?: "text" | "hex";
   content?: string;
+  // AETHER_WOLF_BINARY_IMPORT
+  filename?: string;
+  data?: string;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -66,6 +69,10 @@ type AetherDebugResponse = {
   entries?: AetherDebugEntry[];
   truncated?: boolean;
   file?: { path: string; size: number; format: "text" | "hex"; content: string };
+  // AETHER_WOLF_BINARY_EXPORT
+  exportedFile?: { path: string; size: number; data: string };
+  // AETHER_WOLF_BINARY_IMPORT
+  importedFile?: { path: string; size: number };
   backupPath?: string;
 };
 type AetherDebugFS = {
@@ -77,6 +84,7 @@ type AetherDebugFS = {
   writeFile(path: string, data: Uint8Array | string): unknown;
 };
 const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
+const AETHER_DEBUG_MAX_EXPORT_BYTES = 16 * 1024 * 1024;
 
 // AetherPlay diagnostic: capture WebAssembly.Memory without relying on
 // Emscripten Module.HEAP* properties.
@@ -257,6 +265,69 @@ function aetherDebugReadFile(pathInput: string): NonNullable<AetherDebugResponse
     return { path, size: bytes.byteLength, format: "hex", content: hex };
   }
 }
+// AETHER_WOLF_BINARY_EXPORT: encode bounded chunks to avoid argument-limit errors.
+function aetherDebugToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x6000; // divisible by three, so intermediate chunks need no padding
+  const parts: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+    parts.push(btoa(String.fromCharCode(...chunk)));
+  }
+  return parts.join("");
+}
+
+// AETHER_WOLF_BINARY_IMPORT: decode base64 into exact bytes without text conversion.
+function aetherDebugFromBase64(value: string): Uint8Array {
+  if (typeof value !== "string" || value.length === 0) throw new Error("缺少存档数据。");
+  if (value.length > 22_369_624 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error("存档数据无效或超过 16 MiB 导入上限。");
+  }
+  const binary = atob(value);
+  if (binary.length > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("存档超过 16 MiB 导入上限。");
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+function aetherDebugEnsureParents(fs: AetherDebugFS, path: string): void {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  let current = "";
+  for (const part of parts) {
+    current += `/${part}`;
+    if (!fs.analyzePath(current).exists) fs.mkdir(current);
+  }
+}
+function aetherDebugImportFile(message: AetherDebugCommand): { path: string; size: number; backupPath?: string } {
+  const fs = aetherDebugFs();
+  const path = aetherDebugNormalizePath(message.path || "");
+  if (path === "/" || path.startsWith("/.aetherplay-debug-backups/")) {
+    throw new Error("不能把存档导入根目录或调试备份目录。");
+  }
+  const bytes = aetherDebugFromBase64(message.data || "");
+  let backupPath: string | undefined;
+  if (fs.analyzePath(path).exists) {
+    const oldInfo = fs.stat(path);
+    if (aetherDebugModeKind(Number(oldInfo.mode) || 0) === "directory") throw new Error("目标路径是目录，请选择存档文件名。");
+    if (Math.max(0, Number(oldInfo.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("现有文件超过 16 MiB，拒绝覆盖以避免无法备份。");
+    const oldBytes = aetherDebugToBytes(fs.readFile(path));
+    if (oldBytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("现有文件超过 16 MiB，拒绝覆盖以避免无法备份。");
+    const backupDirectory = "/.aetherplay-debug-backups";
+    if (!fs.analyzePath(backupDirectory).exists) fs.mkdir(backupDirectory);
+    const baseName = path.split("/").filter(Boolean).pop() || "save";
+    const safeBaseName = baseName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
+    backupPath = `${backupDirectory}/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${safeBaseName}`;
+    fs.writeFile(backupPath, oldBytes);
+  }
+  aetherDebugEnsureParents(fs, path);
+  fs.writeFile(path, bytes);
+  const written = aetherDebugToBytes(fs.readFile(path));
+  if (written.byteLength !== bytes.byteLength) throw new Error("导入后校验失败：文件大小不一致。");
+  for (let index = 0; index < bytes.byteLength; index += 1) {
+    if (written[index] !== bytes[index]) throw new Error("导入后校验失败：文件内容不一致。");
+  }
+  return { path, size: bytes.byteLength, backupPath };
+}
+
 function aetherDebugWriteFile(message: AetherDebugCommand): { backupPath: string } {
   const fs = aetherDebugFs();
   const path = aetherDebugNormalizePath(message.path || "");
@@ -295,7 +366,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file") return;
+  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "export-file" && command !== "import-file") return;
   try {
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -329,6 +400,34 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (command === "list-files") {
       const result = aetherDebugListDirectory(message.path || "/");
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, ...result });
+      return;
+    }
+    // AETHER_WOLF_BINARY_IMPORT: import exact binary bytes to the chosen virtual path.
+    if (command === "import-file") {
+      const result = aetherDebugImportFile(message as AetherDebugCommand);
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true, importedFile: { path: result.path, size: result.size }, backupPath: result.backupPath,
+      });
+      return;
+    }
+    // AETHER_WOLF_BINARY_EXPORT: export bytes exactly as stored in WOLF's virtual filesystem.
+    if (command === "export-file") {
+      const fs = aetherDebugFs();
+      const path = aetherDebugNormalizePath(message.path || "");
+      if (path === "/") throw new Error("不能把根目录导出为文件。请先选择存档文件。 ");
+      const info = fs.stat(path);
+      if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") throw new Error("所选路径是目录。请先选择存档文件。");
+      if (Math.max(0, Number(info.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) {
+        throw new Error("文件超过 16 MiB 导出上限。");
+      }
+      const bytes = aetherDebugToBytes(fs.readFile(path));
+      if (bytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("文件实际大小超过 16 MiB 导出上限。");
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        exportedFile: { path, size: bytes.byteLength, data: aetherDebugToBase64(bytes) },
+      });
       return;
     }
     if (command === "read-file") {
