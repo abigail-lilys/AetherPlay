@@ -236,6 +236,14 @@ function candidateTitle(systemTitle: string, paths: string[], fallback: string):
   return normalizedFallback || inferredTitle || FALLBACK_GAME_TITLE;
 }
 
+// AETHER_ANDROID_MIME_FIX_V1: prefer filename MIME for known extensions because
+// Android document providers often label JavaScript/HTML as application/octet-stream.
+function mimeForAndroidEntry(path: string, suppliedMime?: string): string {
+  const detected = detectMime(path);
+  if (detected !== "application/octet-stream") return detected;
+  return suppliedMime?.trim() || detected;
+}
+
 export async function candidateFromAndroidFolder(
   folder: AndroidFolderChoice,
 ): Promise<AndroidFolderCandidate> {
@@ -246,7 +254,7 @@ export async function candidateFromAndroidFolder(
         path,
         uri: entry.uri,
         size: Math.max(0, entry.size || 0),
-        mime: entry.mimeType || detectMime(path),
+        mime: mimeForAndroidEntry(path, entry.mimeType),
       };
     })
     .filter((entry) => entry.path && entry.uri);

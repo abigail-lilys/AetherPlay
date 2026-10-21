@@ -777,6 +777,23 @@ function isPlainAudioPath(path) {
   );
 }
 
+// AETHER_ANDROID_MIME_FIX_V1: infer active content MIME when old metadata is generic.
+function mimeForStoredGamePath(path) {
+  const lowerPath = String(path || "").split("?")[0].split("#")[0].toLowerCase();
+  if (lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (lowerPath.endsWith(".js") || lowerPath.endsWith(".mjs")) return "text/javascript; charset=utf-8";
+  if (lowerPath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (lowerPath.endsWith(".json")) return "application/json; charset=utf-8";
+  if (lowerPath.endsWith(".wasm")) return "application/wasm";
+  if (lowerPath.endsWith(".svg")) return "image/svg+xml";
+  if (lowerPath.endsWith(".txt") || lowerPath.endsWith(".xml")) return "text/plain; charset=utf-8";
+  if (lowerPath.endsWith(".ttf")) return "font/ttf";
+  if (lowerPath.endsWith(".otf")) return "font/otf";
+  if (lowerPath.endsWith(".woff")) return "font/woff";
+  if (lowerPath.endsWith(".woff2")) return "font/woff2";
+  return undefined;
+}
+
 function plainMimeForPath(path) {
   const lowerPath = path.toLowerCase();
   if (lowerPath.endsWith(".png")) return "image/png";
@@ -1166,9 +1183,13 @@ async function serveGameFile(url, request) {
   );
   if (transformed.error) return transformed.error;
   const responseBlob = transformed.blob;
+  const storedMime = typeof record.mime === "string" ? record.mime.trim() : "";
+  const storedMimeIsGeneric = !storedMime || /^(?:application\/octet-stream|binary\/octet-stream|application\/binary|\*\/\*)(?:\s*;.*)?$/i.test(storedMime);
+  const extensionMime = mimeForStoredGamePath(record.path);
   const contentType =
     transformed.mime ||
-    record.mime ||
+    (storedMimeIsGeneric && extensionMime ? extensionMime : undefined) ||
+    storedMime ||
     responseBlob.type ||
     blob.type ||
     "application/octet-stream";
@@ -1196,7 +1217,7 @@ async function serveGameFile(url, request) {
     });
   }
 
-  if ((record.mime || "").startsWith("text/html")) {
+  if (contentType.toLowerCase().startsWith("text/html")) {
     const html = await responseBlob.text();
     const files = await getGameFiles(gameId);
     return new Response(injectBridge(html, game, files), {

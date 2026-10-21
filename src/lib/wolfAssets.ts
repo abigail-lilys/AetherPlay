@@ -1,4 +1,5 @@
 import { Capacitor } from "@capacitor/core";
+import { detectMime } from "@/src/lib/mime"; // AETHER_ANDROID_MIME_FIX_V1
 import { readAndroidFolderFile, registerAndroidGameAssets } from "@/src/lib/androidFolderPicker";
 import { diagnosticErrorText, logDiagnostic } from "@/src/lib/diagnostics";
 import { getSessionFolderFile } from "@/src/lib/sessionFiles";
@@ -12,6 +13,13 @@ const FILE_READ_CONCURRENCY = 8;
 function isLooseWolfAsset(path: string): boolean {
   return normalizeStoredPath(path).toLowerCase().startsWith("data/");
 }
+// AETHER_ANDROID_MIME_FIX_V1: correct stale/generic MIME metadata for known file extensions.
+function mimeForStoredWolfAsset(path: string, storedMime?: string): string {
+  const detected = detectMime(path);
+  if (detected !== "application/octet-stream") return detected;
+  return storedMime || detected;
+}
+
 function encodedPath(path: string): string {
   return normalizeStoredPath(path).split("/").map(encodeURIComponent).join("/");
 }
@@ -63,7 +71,7 @@ export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAss
     const registeredCount = await registerAndroidGameAssets(gameId, androidRecords.map((record) => ({
       path: normalizeStoredPath(record.path),
       uri: record.storageRef,
-      mime: record.mime || "application/octet-stream",
+      mime: mimeForStoredWolfAsset(record.path, record.mime),
     })));
     if (registeredCount !== androidRecords.length) {
       throw new Error(`Android asset registration incomplete (${registeredCount}/${androidRecords.length}).`);
