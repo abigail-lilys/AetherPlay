@@ -102,32 +102,34 @@ export function usePlayerController() {
         const skipRestoreKey = `aetherplay-debug-skip-wolf-save-restore-once:${game.id}`;
         const restoreModeKey = `aetherplay-debug-wolf-save-restore-mode-once:${game.id}`;
         let skipRestoreOnce = false;
-        let restoreMode: "all" | "nested" | "root" | "root-to-nested" = "all";
+        let restoreMode: "none" | "all" | "nested" | "root" | "root-to-nested" = "none"; // AETHER_WOLF_NO_AUTO_RESTORE_V1
         try {
           skipRestoreOnce = window.localStorage.getItem(skipRestoreKey) === "1";
           if (skipRestoreOnce) window.localStorage.removeItem(skipRestoreKey);
           const requestedMode = window.localStorage.getItem(restoreModeKey);
-          if (requestedMode === "nested" || requestedMode === "root" || requestedMode === "root-to-nested") {
+          if (requestedMode === "all" || requestedMode === "nested" || requestedMode === "root" || requestedMode === "root-to-nested") {
             restoreMode = requestedMode;
             window.localStorage.removeItem(restoreModeKey);
           }
         } catch {
           // Diagnostic flags are optional; never prevent game startup.
         }
-        const selectedSaves = restoreMode === "nested"
-          ? persistedSaves.filter((save) => /-Save\/Save\/SaveData\d+\.sav$/iu.test(save.path))
-          : restoreMode === "root" || restoreMode === "root-to-nested"
-            ? persistedSaves.filter((save) => /-Save\/SaveData\d+\.sav$/iu.test(save.path))
-            : persistedSaves;
+        const selectedSaves = restoreMode === "none"
+          ? []
+          : restoreMode === "nested"
+            ? persistedSaves.filter((save) => /-Save\/Save\/SaveData\d+\.sav$/iu.test(save.path))
+            : restoreMode === "root" || restoreMode === "root-to-nested"
+              ? persistedSaves.filter((save) => /-Save\/SaveData\d+\.sav$/iu.test(save.path))
+              : persistedSaves;
         // Isolated restore tests must not replace stored blobs with test-session writes.
-        if (skipRestoreOnce || restoreMode !== "all") {
+        if (skipRestoreOnce || (restoreMode !== "none" && restoreMode !== "all")) {
           wolfSavePersistenceSuppressedRef.current = game.id;
         } else if (wolfSavePersistenceSuppressedRef.current === game.id) {
           // The previous test's write suppression lasts for one runtime session only.
           wolfSavePersistenceSuppressedRef.current = undefined;
           logDiagnostic("info", "wolf.save.persist.test-suppression-cleared", { gameId: game.id });
         }
-        logDiagnostic(skipRestoreOnce || restoreMode !== "all" ? "warn" : "info", "wolf.save.restore.records-loaded", {
+        logDiagnostic(skipRestoreOnce || (restoreMode !== "none" && restoreMode !== "all") ? "warn" : "info", "wolf.save.restore.records-loaded", {
           gameId: game.id,
           storedCount: persistedSaves.length,
           restoreSkippedOnce: skipRestoreOnce,
