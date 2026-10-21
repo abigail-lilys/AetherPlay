@@ -77,6 +77,119 @@ type AetherDebugFS = {
   writeFile(path: string, data: Uint8Array | string): unknown;
 };
 const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
+
+// AetherPlay diagnostic: capture WebAssembly.Memory without relying on
+// Emscripten Module.HEAP* properties.
+type AetherDebugWasmApi = {
+  instantiate: (...args: unknown[]) => unknown;
+  instantiateStreaming?: (...args: unknown[]) => unknown;
+};
+
+let aetherDebugCapturedMemory: WebAssembly.Memory | undefined;
+let aetherDebugMemorySource = "未捕获";
+let aetherDebugWasmInstantiateCalls = 0;
+let aetherDebugWasmCaptureHookInstalled = false;
+
+function aetherDebugCaptureMemoryTree(
+  value: unknown,
+  source: string,
+  depth = 0,
+): void {
+  if (typeof WebAssembly === "undefined") return;
+
+  if (value instanceof WebAssembly.Memory) {
+    // Prefer a memory explicitly exported by the instantiated WASM.
+    if (!aetherDebugCapturedMemory || source.includes(".exports.")) {
+      aetherDebugCapturedMemory = value;
+      aetherDebugMemorySource = source;
+    }
+    return;
+  }
+
+  if (value instanceof WebAssembly.Instance) {
+    const exports = value.exports as unknown as Record<string, unknown>;
+    for (const key of Object.keys(exports)) {
+      aetherDebugCaptureMemoryTree(
+        exports[key],
+        `${source}.exports.${key}`,
+        depth + 1,
+      );
+    }
+    return;
+  }
+
+  if (!value || typeof value !== "object" || depth >= 3) return;
+
+  let keys: string[];
+  try {
+    keys = Object.keys(value as Record<string, unknown>);
+  } catch {
+    return;
+  }
+
+  for (const key of keys) {
+    if (key === "memory" || key === "instance" ||
+        key === "exports" || depth < 2) {
+      try {
+        aetherDebugCaptureMemoryTree(
+          (value as Record<string, unknown>)[key],
+          `${source}.${key}`,
+          depth + 1,
+        );
+      } catch {
+        // Ignore inaccessible import/export properties.
+      }
+    }
+  }
+}
+
+function aetherDebugInstallWasmCapture(): void {
+  if (typeof WebAssembly === "undefined") return;
+
+  const api = WebAssembly as unknown as AetherDebugWasmApi;
+  let installed = 0;
+
+  for (const method of ["instantiate", "instantiateStreaming"] as const) {
+    const original = api[method];
+    if (typeof original !== "function") continue;
+
+    try {
+      api[method] = (...args: unknown[]): unknown => {
+        aetherDebugWasmInstantiateCalls += 1;
+        aetherDebugCaptureMemoryTree(
+          args[1],
+          `WebAssembly.${method}.imports`,
+        );
+
+        const result = original.apply(WebAssembly, args);
+
+        if (result && typeof (result as { then?: unknown }).then === "function") {
+          return (result as Promise<unknown>).then((value) => {
+            aetherDebugCaptureMemoryTree(
+              value,
+              `WebAssembly.${method}.result`,
+            );
+            return value;
+          });
+        }
+
+        aetherDebugCaptureMemoryTree(
+          result,
+          `WebAssembly.${method}.result`,
+        );
+        return result;
+      };
+
+      if (api[method] !== original) installed += 1;
+    } catch {
+      // Keep the runtime working even if this browser prevents interception.
+    }
+  }
+
+  aetherDebugWasmCaptureHookInstalled = installed > 0;
+}
+
+aetherDebugInstallWasmCapture();
 function aetherDebugNormalizePath(value: string): string {
   if (typeof value !== "string" || value.length > 2048 || value.includes("\0")) throw new Error("无效文件路径。");
   const parts: string[] = [];
@@ -191,8 +304,11 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       const heap32 = module?.HEAP32 instanceof Int32Array;
       const heapF32 = module?.HEAPF32 instanceof Float32Array;
       const heapF64 = module?.HEAPF64 instanceof Float64Array;
-      const wasmMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory;
-      const memoryBuffer = heapU8?.buffer ?? (wasmMemory ? (module?.wasmMemory as WebAssembly.Memory).buffer : undefined);
+      const moduleMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory
+        ? module.wasmMemory
+        : undefined;
+      const memory = aetherDebugCapturedMemory ?? moduleMemory;
+      const memoryBuffer = heapU8?.buffer ?? memory?.buffer;
       const fs = FS as unknown as Partial<AetherDebugFS>;
       aetherDebugRespond({
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true,
@@ -200,8 +316,12 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
           engine: "WOLF RPG / Browser Woditor",
           moduleAvailable: Boolean(module),
           filesystemAvailable: typeof fs.readdir === "function" && typeof fs.stat === "function" && typeof fs.readFile === "function" && typeof fs.writeFile === "function",
-          memoryAvailable: Boolean(heapU8 || wasmMemory), heapU8: Boolean(heapU8), heap32, heapF32, heapF64,
-          wasmMemory: Boolean(wasmMemory), heapBytes: memoryBuffer instanceof ArrayBuffer ? memoryBuffer.byteLength : 0,
+          memoryAvailable: Boolean(heapU8 || memory), heapU8: Boolean(heapU8), heap32, heapF32, heapF64,
+          wasmMemory: Boolean(memory),
+          wasmMemorySource: aetherDebugCapturedMemory ? aetherDebugMemorySource : (moduleMemory ? "Module.wasmMemory" : "未捕获"),
+          wasmCaptureHookInstalled: aetherDebugWasmCaptureHookInstalled,
+          wasmInstantiateCalls: aetherDebugWasmInstantiateCalls,
+          heapBytes: memoryBuffer?.byteLength ?? 0,
         },
       });
       return;

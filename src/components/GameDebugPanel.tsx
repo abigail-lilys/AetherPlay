@@ -27,6 +27,9 @@ interface DebugCapabilities {
   heapF64: boolean;
   heapBytes: number;
   wasmMemory: boolean;
+  wasmMemorySource: string;
+  wasmCaptureHookInstalled: boolean;
+  wasmInstantiateCalls: number;
 }
 interface DebugResponse {
   type: "aetherplay-debug-result";
@@ -286,6 +289,9 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
             {infoRow("HEAPF32", capabilities?.heapF32 ? "可用" : "未暴露")}
             {infoRow("HEAPF64", capabilities?.heapF64 ? "可用" : "未暴露")}
             {infoRow("wasmMemory", capabilities?.wasmMemory ? "可用" : "未暴露")}
+            {infoRow("捕获钩子", capabilities?.wasmCaptureHookInstalled ? "已安装" : "未安装")}
+            {infoRow("WASM 实例化调用次数", String(capabilities?.wasmInstantiateCalls ?? 0))}
+            {infoRow("内存来源", capabilities?.wasmMemorySource || "未知")}
             <div style={{ marginTop: 14, border: "1px dashed #45536a", borderRadius: 10, padding: 12 }}>
               <div style={{ fontWeight: 650, fontSize: 13 }}>数值扫描器：尚未启用</div>
               <div style={{ ...subtleStyle, marginTop: 5 }}>下一阶段会先验证候选地址筛选与写入闭环，再开放等于、增大、减小、变化/不变筛选。</div>

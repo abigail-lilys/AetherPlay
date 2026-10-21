@@ -27,3 +27,14 @@ allprojects {
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
+
+
+// AetherPlay Termux NDK override
+subprojects { p ->
+    p.plugins.withId('com.android.application') {
+        p.android.ndkVersion = '29.0.14206865'
+    }
+    p.plugins.withId('com.android.library') {
+        p.android.ndkVersion = '29.0.14206865'
+    }
+}
