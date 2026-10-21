@@ -392,7 +392,16 @@ ${targetPath}
               } catch (cause) {
                 setError(cause instanceof Error ? cause.message : String(cause));
               }
-            }}>诊断：下次只恢复外层 *-Save/SaveData*.sav</button>
+            }}>诊断：下次只恢复外层 *-Save/SaveData*.sav（原路径）</button>
+            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
+              try {
+                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "root-to-nested");
+                setError("");
+                setNotice("已设置：下次只读取外层 *-Save/SaveData*.sav 的字节，但把它放到游戏实际写入的内层 *-Save/Save/SaveData*.sav 路径。原存档记录不会被删除，本次测试会暂停运行时回写。请返回游戏库后重新进入。 ");
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : String(cause));
+              }
+            }}>诊断：把外层存档内容恢复到内层 Save/ 目录</button>
           </section>
         ) : null}
 

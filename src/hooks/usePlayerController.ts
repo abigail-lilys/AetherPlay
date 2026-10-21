@@ -16,6 +16,14 @@ import { useTextLog } from "@/src/hooks/useTextLog";
 const textLogLimit = 100;
 const serviceTitle = "Local Web Game Player";
 
+// WOLF loose games in this project write their active slot under *-Save/Save/.
+// Keep the stored source record untouched; this helper changes only its runtime restore destination.
+function wolfSaveRestoreTargetPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  const match = normalized.match(/^(.*-Save)\/(SaveData\d+\.sav)$/iu);
+  return match ? `${match[1]}/Save/${match[2]}` : normalized;
+}
+
 export function usePlayerController() {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [overlayAvailability, setOverlayAvailability] = useState<{
@@ -94,12 +102,12 @@ export function usePlayerController() {
         const skipRestoreKey = `aetherplay-debug-skip-wolf-save-restore-once:${game.id}`;
         const restoreModeKey = `aetherplay-debug-wolf-save-restore-mode-once:${game.id}`;
         let skipRestoreOnce = false;
-        let restoreMode: "all" | "nested" | "root" = "all";
+        let restoreMode: "all" | "nested" | "root" | "root-to-nested" = "all";
         try {
           skipRestoreOnce = window.localStorage.getItem(skipRestoreKey) === "1";
           if (skipRestoreOnce) window.localStorage.removeItem(skipRestoreKey);
           const requestedMode = window.localStorage.getItem(restoreModeKey);
-          if (requestedMode === "nested" || requestedMode === "root") {
+          if (requestedMode === "nested" || requestedMode === "root" || requestedMode === "root-to-nested") {
             restoreMode = requestedMode;
             window.localStorage.removeItem(restoreModeKey);
           }
@@ -108,11 +116,17 @@ export function usePlayerController() {
         }
         const selectedSaves = restoreMode === "nested"
           ? persistedSaves.filter((save) => /-Save\/Save\/SaveData\d+\.sav$/iu.test(save.path))
-          : restoreMode === "root"
+          : restoreMode === "root" || restoreMode === "root-to-nested"
             ? persistedSaves.filter((save) => /-Save\/SaveData\d+\.sav$/iu.test(save.path))
             : persistedSaves;
-        // Isolated restore tests must not replace the stored blobs with test-session writes.
-        if (skipRestoreOnce || restoreMode !== "all") wolfSavePersistenceSuppressedRef.current = game.id;
+        // Isolated restore tests must not replace stored blobs with test-session writes.
+        if (skipRestoreOnce || restoreMode !== "all") {
+          wolfSavePersistenceSuppressedRef.current = game.id;
+        } else if (wolfSavePersistenceSuppressedRef.current === game.id) {
+          // The previous test's write suppression lasts for one runtime session only.
+          wolfSavePersistenceSuppressedRef.current = undefined;
+          logDiagnostic("info", "wolf.save.persist.test-suppression-cleared", { gameId: game.id });
+        }
         logDiagnostic(skipRestoreOnce || restoreMode !== "all" ? "warn" : "info", "wolf.save.restore.records-loaded", {
           gameId: game.id,
           storedCount: persistedSaves.length,
@@ -120,11 +134,13 @@ export function usePlayerController() {
           restoreMode,
           selectedCount: skipRestoreOnce ? 0 : selectedSaves.length,
           saves: persistedSaves.map(({ path, size }) => ({ path, size })),
-          selectedSavePaths: skipRestoreOnce ? [] : selectedSaves.map(({ path, size }) => ({ path, size })),
+          selectedSavePaths: skipRestoreOnce ? [] : selectedSaves.map(({ path, size }) => ({
+            path, size, targetPath: restoreMode === "root-to-nested" ? wolfSaveRestoreTargetPath(path) : path,
+          })),
         });
         if (!skipRestoreOnce) {
           savedFiles = await Promise.all(selectedSaves.map(async (save) => ({
-            path: save.path,
+            path: restoreMode === "root-to-nested" ? wolfSaveRestoreTargetPath(save.path) : save.path,
             data: await save.blob.arrayBuffer(),
           })));
         }
