@@ -4,6 +4,7 @@ import { logDiagnostic } from "@/src/lib/diagnostics";
 import type { GameRecord } from "@/src/lib/types";
 import { Icon } from "@/src/components/Icon";
 import { TextLogPanel } from "@/src/components/TextLogPanel";
+import { GameDebugPanel } from "@/src/components/GameDebugPanel";
 import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/lib/androidOrientation";
 import { setAndroidImmersive } from "@/src/lib/androidImmersive";
 
@@ -59,6 +60,7 @@ export function PlayerPanel({
   textLogs,
 }: PlayerPanelProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
   const [screenOrientation, setScreenOrientation] = useState<GameScreenOrientation>(readScreenOrientation);
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export function PlayerPanel({
         error: cause instanceof Error ? cause.message : String(cause),
       });
     });
-    return () => {
+    const playerPanelContent = () => {
       void setAndroidImmersive(false).catch(() => undefined);
     };
   }, [Boolean(activeGame)]);
@@ -358,5 +360,45 @@ export function PlayerPanel({
         </>
       )}
     </section>
+  );
+  return (
+    <>
+      {playerPanelContent}
+      {activeGame ? (
+        <>
+          <button
+            type="button"
+            aria-label="打开游戏调试台"
+            title={`调试：${activeGame.title}`}
+            onClick={() => setDebugOpen((open) => !open)}
+            style={{
+              position: "fixed",
+              right: "14px",
+              bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
+              zIndex: 99990,
+              border: "1px solid #6aa8ef",
+              borderRadius: 999,
+              padding: "10px 15px",
+              background: "#1d4f85",
+              color: "#fff",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              boxShadow: "0 4px 18px rgba(0,0,0,.35)",
+            }}
+          >
+            DEBUG
+          </button>
+          {debugOpen ? (
+            <GameDebugPanel
+              gameId={activeGame.id}
+              gameTitle={activeGame.title}
+              frameRef={frameRef}
+              onClose={() => setDebugOpen(false)}
+            />
+          ) : null}
+        </>
+      ) : null}
+    </>
   );
 }

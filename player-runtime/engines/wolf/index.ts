@@ -43,6 +43,189 @@ const config = (window as typeof window & {
 const runtimeModule = (window as typeof window & { Module?: WolfRuntimeModule }).Module ?? Module;
 let activeModule: WolfRuntimeModule | undefined;
 
+// AetherPlay WOLF debug bridge. This snippet is inserted after activeModule is declared.
+type AetherDebugCommand = {
+  type: "aetherplay-debug-command";
+  requestId: string;
+  gameId: string;
+  command: "probe" | "list-files" | "read-file" | "write-file";
+  path?: string;
+  format?: "text" | "hex";
+  content?: string;
+};
+type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
+type AetherDebugResponse = {
+  type: "aetherplay-debug-result";
+  requestId: string;
+  gameId: string;
+  command: AetherDebugCommand["command"];
+  ok: boolean;
+  error?: string;
+  capabilities?: Record<string, unknown>;
+  path?: string;
+  entries?: AetherDebugEntry[];
+  truncated?: boolean;
+  file?: { path: string; size: number; format: "text" | "hex"; content: string };
+  backupPath?: string;
+};
+type AetherDebugFS = {
+  analyzePath(path: string): { exists: boolean };
+  mkdir(path: string): void;
+  readdir(path: string): string[];
+  stat(path: string): { size: number; mode: number };
+  readFile(path: string): Uint8Array | string;
+  writeFile(path: string, data: Uint8Array | string): unknown;
+};
+const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
+function aetherDebugNormalizePath(value: string): string {
+  if (typeof value !== "string" || value.length > 2048 || value.includes("\0")) throw new Error("无效文件路径。");
+  const parts: string[] = [];
+  for (const part of value.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+function aetherDebugFs(): AetherDebugFS {
+  const candidate = FS as unknown as Partial<AetherDebugFS>;
+  if (typeof candidate.readdir !== "function" || typeof candidate.stat !== "function" || typeof candidate.readFile !== "function" || typeof candidate.writeFile !== "function") {
+    throw new Error("WOLF 虚拟文件系统接口尚未就绪。");
+  }
+  return candidate as AetherDebugFS;
+}
+function aetherDebugToBytes(value: Uint8Array | string): Uint8Array {
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) bytes[index] = value.charCodeAt(index) & 0xff;
+  return bytes;
+}
+function aetherDebugModeKind(mode: number): "directory" | "file" {
+  return (mode & 0o170000) === 0o040000 ? "directory" : "file";
+}
+function aetherDebugListDirectory(pathInput: string): { path: string; entries: AetherDebugEntry[]; truncated: boolean } {
+  const fs = aetherDebugFs();
+  const path = aetherDebugNormalizePath(pathInput || "/");
+  const names = fs.readdir(path).filter((name) => name !== "." && name !== "..").sort((a, b) => a.localeCompare(b));
+  const truncated = names.length > 250;
+  const entries = names.slice(0, 250).map((name) => {
+    const entryPath = path === "/" ? `/${name}` : `${path}/${name}`;
+    try {
+      const info = fs.stat(entryPath);
+      return { name, path: entryPath, kind: aetherDebugModeKind(Number(info.mode) || 0), size: Math.max(0, Number(info.size) || 0) };
+    } catch {
+      try {
+        fs.readdir(entryPath);
+        return { name, path: entryPath, kind: "directory" as const, size: 0 };
+      } catch {
+        return { name, path: entryPath, kind: "file" as const, size: 0 };
+      }
+    }
+  }).sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
+  return { path, entries, truncated };
+}
+function aetherDebugReadFile(pathInput: string): NonNullable<AetherDebugResponse["file"]> {
+  const fs = aetherDebugFs();
+  const path = aetherDebugNormalizePath(pathInput);
+  if (path === "/") throw new Error("不能把根目录当作文件读取。");
+  const info = fs.stat(path);
+  if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") throw new Error("所选路径是目录。");
+  const size = Math.max(0, Number(info.size) || 0);
+  if (size > AETHER_DEBUG_MAX_BYTES) throw new Error("文件超过 256 KiB。为避免卡顿，本版本不在调试面板中读取该文件。");
+  const bytes = aetherDebugToBytes(fs.readFile(path));
+  if (bytes.byteLength > AETHER_DEBUG_MAX_BYTES) throw new Error("文件实际大小超过安全读取上限。");
+  let text = "";
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw new Error("binary");
+    return { path, size: bytes.byteLength, format: "text", content: text };
+  } catch {
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(" ");
+    return { path, size: bytes.byteLength, format: "hex", content: hex };
+  }
+}
+function aetherDebugWriteFile(message: AetherDebugCommand): { backupPath: string } {
+  const fs = aetherDebugFs();
+  const path = aetherDebugNormalizePath(message.path || "");
+  if (path === "/" || path.startsWith("/.aetherplay-debug-backups/")) throw new Error("禁止覆盖根目录或调试器备份文件。");
+  if (typeof message.content !== "string") throw new Error("缺少待写入内容。");
+  const info = fs.stat(path);
+  if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") throw new Error("不能覆盖目录。");
+  const oldBytes = aetherDebugToBytes(fs.readFile(path));
+  if (oldBytes.byteLength > AETHER_DEBUG_MAX_BYTES) throw new Error("原文件超过 256 KiB，拒绝修改以避免意外损坏。");
+  let newBytes: Uint8Array;
+  if (message.format === "hex") {
+    const compact = message.content.replace(/\s+/g, "");
+    if (compact.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(compact)) throw new Error("十六进制内容格式错误：只能包含成对的 0-9、a-f 字节。");
+    if (compact.length / 2 > AETHER_DEBUG_MAX_BYTES) throw new Error("写入内容超过 256 KiB。");
+    newBytes = new Uint8Array(compact.length / 2);
+    for (let index = 0; index < newBytes.length; index += 1) newBytes[index] = Number.parseInt(compact.slice(index * 2, index * 2 + 2), 16);
+  } else {
+    newBytes = new TextEncoder().encode(message.content);
+    if (newBytes.byteLength > AETHER_DEBUG_MAX_BYTES) throw new Error("写入内容超过 256 KiB。");
+  }
+  const backupDirectory = "/.aetherplay-debug-backups";
+  if (!fs.analyzePath(backupDirectory).exists) fs.mkdir(backupDirectory);
+  const baseName = path.split("/").filter(Boolean).pop() || "file";
+  const safeBaseName = baseName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
+  const backupPath = `${backupDirectory}/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${safeBaseName}`;
+  fs.writeFile(backupPath, oldBytes);
+  fs.writeFile(path, newBytes);
+  return { backupPath };
+}
+function aetherDebugRespond(response: AetherDebugResponse) {
+  window.parent.postMessage(response, window.location.origin);
+}
+window.addEventListener("message", (event: MessageEvent<unknown>) => {
+  if (event.origin !== window.location.origin || event.source !== window.parent) return;
+  if (!event.data || typeof event.data !== "object") return;
+  const message = event.data as Partial<AetherDebugCommand>;
+  if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
+  const command = message.command;
+  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file") return;
+  try {
+    if (command === "probe") {
+      const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
+      const heapCandidate = module?.HEAPU8;
+      const heapU8 = heapCandidate instanceof Uint8Array ? heapCandidate : undefined;
+      const heap32 = module?.HEAP32 instanceof Int32Array;
+      const heapF32 = module?.HEAPF32 instanceof Float32Array;
+      const heapF64 = module?.HEAPF64 instanceof Float64Array;
+      const wasmMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory;
+      const memoryBuffer = heapU8?.buffer ?? (wasmMemory ? (module?.wasmMemory as WebAssembly.Memory).buffer : undefined);
+      const fs = FS as unknown as Partial<AetherDebugFS>;
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true,
+        capabilities: {
+          engine: "WOLF RPG / Browser Woditor",
+          moduleAvailable: Boolean(module),
+          filesystemAvailable: typeof fs.readdir === "function" && typeof fs.stat === "function" && typeof fs.readFile === "function" && typeof fs.writeFile === "function",
+          memoryAvailable: Boolean(heapU8 || wasmMemory), heapU8: Boolean(heapU8), heap32, heapF32, heapF64,
+          wasmMemory: Boolean(wasmMemory), heapBytes: memoryBuffer instanceof ArrayBuffer ? memoryBuffer.byteLength : 0,
+        },
+      });
+      return;
+    }
+    if (command === "list-files") {
+      const result = aetherDebugListDirectory(message.path || "/");
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, ...result });
+      return;
+    }
+    if (command === "read-file") {
+      const file = aetherDebugReadFile(message.path || "/");
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, file });
+      return;
+    }
+    const result = aetherDebugWriteFile(message as AetherDebugCommand);
+    aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, ...result });
+  } catch (cause) {
+    aetherDebugRespond({
+      type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+    });
+  }
+});
+
 function showStatus(message: string) {
   const target = document.querySelector<HTMLElement>("#touchtostart");
   if (target) target.textContent = message;
