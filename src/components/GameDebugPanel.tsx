@@ -366,6 +366,15 @@ ${targetPath}
               void request("probe").then((response) => { setCapabilities(response.capabilities ?? null); setNotice("运行时能力已刷新。"); })
                 .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
             }}>重新探测</button>
+            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
+              try {
+                window.localStorage.setItem(`aetherplay-debug-skip-wolf-save-restore-once:${gameId}`, "1");
+                setError("");
+                setNotice("已设置：下次重新进入此游戏时跳过恢复持久化存档，仅用于诊断；不会删除已导入的存档，也会暂停本次测试会话的存档回写。请关闭调试台，返回游戏库后重新进入游戏。");
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : String(cause));
+              }
+            }}>诊断：下次启动跳过存档恢复（不删除存档）</button>
           </section>
         ) : null}
 

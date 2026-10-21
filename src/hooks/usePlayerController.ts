@@ -27,6 +27,7 @@ export function usePlayerController() {
     promise: Promise<WolfAssetObjectUrlSet>;
   } | undefined>(undefined);
 
+  const wolfSavePersistenceSuppressedRef = useRef<string | undefined>(undefined);
   const library = useGameLibrary(() => setRuntimeError(null));
   const player = usePlayerFrame(library.activeGame?.id);
   const textLog = useTextLog(textLogLimit);
@@ -90,10 +91,27 @@ export function usePlayerController() {
       let savedFiles: Array<{ path: string; data: ArrayBuffer }> = [];
       try {
         const persistedSaves = await getWolfSaveBlobs(game.id);
-        savedFiles = await Promise.all(persistedSaves.map(async (save) => ({
-          path: save.path,
-          data: await save.blob.arrayBuffer(),
-        })));
+        const skipRestoreKey = `aetherplay-debug-skip-wolf-save-restore-once:${game.id}`;
+        let skipRestoreOnce = false;
+        try {
+          skipRestoreOnce = window.localStorage.getItem(skipRestoreKey) === "1";
+          if (skipRestoreOnce) window.localStorage.removeItem(skipRestoreKey);
+        } catch {
+          // The diagnostic bypass is optional; never prevent game startup.
+        }
+        if (skipRestoreOnce) wolfSavePersistenceSuppressedRef.current = game.id;
+        logDiagnostic(skipRestoreOnce ? "warn" : "info", "wolf.save.restore.records-loaded", {
+          gameId: game.id,
+          storedCount: persistedSaves.length,
+          restoreSkippedOnce: skipRestoreOnce,
+          saves: persistedSaves.map(({ path, size }) => ({ path, size })),
+        });
+        if (!skipRestoreOnce) {
+          savedFiles = await Promise.all(persistedSaves.map(async (save) => ({
+            path: save.path,
+            data: await save.blob.arrayBuffer(),
+          })));
+        }
       } catch (cause) {
         // Save storage failure must not prevent the original game from starting.
         logDiagnostic("error", "wolf.save.restore.read-failed", { gameId: game.id, error: diagnosticErrorText(cause) });
@@ -101,6 +119,8 @@ export function usePlayerController() {
       logDiagnostic("info", "wolf-assets.response.ready", {
         gameId: game.id, requestId: message.requestId, assetCount: value.assets.length,
         bytesInUrls: value.assets.reduce((sum, asset) => sum + asset.size, 0),
+        savedFileCount: savedFiles.length,
+        savedFilePaths: savedFiles.map((file) => file.path),
         elapsedMs: Date.now() - requestStartedAt,
       });
       (event.source as Window).postMessage(
@@ -140,6 +160,10 @@ export function usePlayerController() {
 
   useEffect(() => {
     return () => clearZipArchiveCache();
+  }, [library.activeGame?.id]);
+
+  useEffect(() => {
+    if (!library.activeGame) wolfSavePersistenceSuppressedRef.current = undefined;
   }, [library.activeGame?.id]);
 
   useEffect(() => {
@@ -207,6 +231,12 @@ export function usePlayerController() {
       if (message.type === "wolf-save-written") {
         const activeGame = library.activeGame;
         if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
+        if (wolfSavePersistenceSuppressedRef.current === message.gameId) {
+          logDiagnostic("warn", "wolf.save.persist.suppressed-for-test", {
+            gameId: message.gameId, path: message.path, bytes: message.data?.byteLength,
+          });
+          return;
+        }
         if (!(message.data instanceof ArrayBuffer) || message.data.byteLength > 16 * 1024 * 1024) {
           logDiagnostic("warn", "wolf.save.persist.rejected", { gameId: message.gameId, path: message.path, bytes: message.data?.byteLength });
           return;
