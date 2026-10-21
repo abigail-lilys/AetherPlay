@@ -92,22 +92,38 @@ export function usePlayerController() {
       try {
         const persistedSaves = await getWolfSaveBlobs(game.id);
         const skipRestoreKey = `aetherplay-debug-skip-wolf-save-restore-once:${game.id}`;
+        const restoreModeKey = `aetherplay-debug-wolf-save-restore-mode-once:${game.id}`;
         let skipRestoreOnce = false;
+        let restoreMode: "all" | "nested" | "root" = "all";
         try {
           skipRestoreOnce = window.localStorage.getItem(skipRestoreKey) === "1";
           if (skipRestoreOnce) window.localStorage.removeItem(skipRestoreKey);
+          const requestedMode = window.localStorage.getItem(restoreModeKey);
+          if (requestedMode === "nested" || requestedMode === "root") {
+            restoreMode = requestedMode;
+            window.localStorage.removeItem(restoreModeKey);
+          }
         } catch {
-          // The diagnostic bypass is optional; never prevent game startup.
+          // Diagnostic flags are optional; never prevent game startup.
         }
-        if (skipRestoreOnce) wolfSavePersistenceSuppressedRef.current = game.id;
-        logDiagnostic(skipRestoreOnce ? "warn" : "info", "wolf.save.restore.records-loaded", {
+        const selectedSaves = restoreMode === "nested"
+          ? persistedSaves.filter((save) => /-Save\/Save\/SaveData\d+\.sav$/iu.test(save.path))
+          : restoreMode === "root"
+            ? persistedSaves.filter((save) => /-Save\/SaveData\d+\.sav$/iu.test(save.path))
+            : persistedSaves;
+        // Isolated restore tests must not replace the stored blobs with test-session writes.
+        if (skipRestoreOnce || restoreMode !== "all") wolfSavePersistenceSuppressedRef.current = game.id;
+        logDiagnostic(skipRestoreOnce || restoreMode !== "all" ? "warn" : "info", "wolf.save.restore.records-loaded", {
           gameId: game.id,
           storedCount: persistedSaves.length,
           restoreSkippedOnce: skipRestoreOnce,
+          restoreMode,
+          selectedCount: skipRestoreOnce ? 0 : selectedSaves.length,
           saves: persistedSaves.map(({ path, size }) => ({ path, size })),
+          selectedSavePaths: skipRestoreOnce ? [] : selectedSaves.map(({ path, size }) => ({ path, size })),
         });
         if (!skipRestoreOnce) {
-          savedFiles = await Promise.all(persistedSaves.map(async (save) => ({
+          savedFiles = await Promise.all(selectedSaves.map(async (save) => ({
             path: save.path,
             data: await save.blob.arrayBuffer(),
           })));

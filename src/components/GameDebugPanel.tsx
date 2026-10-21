@@ -375,6 +375,24 @@ ${targetPath}
                 setError(cause instanceof Error ? cause.message : String(cause));
               }
             }}>诊断：下次启动跳过存档恢复（不删除存档）</button>
+            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
+              try {
+                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "nested");
+                setError("");
+                setNotice("已设置：下次启动只恢复路径为 *-Save/Save/SaveData*.sav 的记录；其他存档仍保留但本次不恢复。测试会暂停本次会话的存档回写。请返回游戏库后重新进入游戏。");
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : String(cause));
+              }
+            }}>诊断：下次只恢复内层 Save/SaveData*.sav</button>
+            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
+              try {
+                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "root");
+                setError("");
+                setNotice("已设置：下次启动只恢复路径为 *-Save/SaveData*.sav 的外层记录；其他存档仍保留但本次不恢复。测试会暂停本次会话的存档回写。请返回游戏库后重新进入游戏。");
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : String(cause));
+              }
+            }}>诊断：下次只恢复外层 *-Save/SaveData*.sav</button>
           </section>
         ) : null}
 
