@@ -620,6 +620,8 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
     if (restoredCount) console.info(`AetherPlay: restored ${restoredCount} persistent WOLF save file(s).`);
 
     // AETHER_WOLF_SAVE_TRACE_V1: temporary, read-only trace of actual WOLF save paths.
+    // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1
+    // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1
     {
       type TraceFn = (...args: unknown[]) => unknown;
       const traceFs = FS as unknown as Record<string, TraceFn>;
@@ -632,7 +634,8 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
       const isSavePath = (value: unknown): boolean => {
         if (typeof value !== "string") return false;
         const path = value.replace(/\\/g, "/").toLowerCase();
-        if (path.includes("-gamecache/")) return false;
+        // GameCache normally contains transient assets, but its Save/ subtree is active game data.
+        if (path.includes("-gamecache/") && !/-gamecache\/save\//u.test(path)) return false;
         return path.includes("-save/")
           || /(?:^|\/)save(?:\/|$)/u.test(path)
           || /(?:^|\/)savedata\d*[^/]*\.(?:sav|save)$/u.test(path)
@@ -646,7 +649,8 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
         try { console.info(line); } catch { /* diagnostics must never break the game */ }
         try {
           window.parent.postMessage({
-            type: "text-log", gameId: traceGameId, text: line, at: Date.now(),
+            type: "wolf-save-trace", gameId: traceGameId,
+            event: eventName, path, details, line, at: Date.now(),
           }, window.location.origin);
         } catch { /* parent logging is optional */ }
       };

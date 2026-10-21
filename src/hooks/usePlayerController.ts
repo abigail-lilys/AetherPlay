@@ -261,6 +261,16 @@ export function usePlayerController() {
       }
 
       const message = event.data;
+      // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1: include runtime FS traces in exported diagnostics.
+      if (message.type === "wolf-save-trace") {
+        const activeGame = library.activeGame;
+        if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
+        logDiagnostic("info", "wolf.save.trace", {
+          gameId: message.gameId, event: message.event, path: message.path,
+          details: message.details, traceLine: message.line, at: message.at,
+        });
+        return;
+      }
       // AETHER_WOLF_SAVE_PERSISTENCE_V1: store WOLF saves outside the volatile WASM FS.
       if (message.type === "wolf-save-written") {
         const activeGame = library.activeGame;

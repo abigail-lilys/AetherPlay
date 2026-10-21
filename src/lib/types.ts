@@ -76,7 +76,9 @@ export type PlayerToParentMessage =
   | { type: "runtime-error"; message: string; stack?: string }
   | { type: "wolf-assets-request"; gameId: string; requestId: string }
   // AETHER_WOLF_SAVE_PERSISTENCE_V1: virtual save file was written by WOLF FS.
-  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer };
+  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer }
+  // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1: read-only runtime file-operation trace.
+  | { type: "wolf-save-trace"; gameId: string; event: string; path: string; details: string; line: string; at: number };
 
 export type ParentToPlayerMessage =
   | { type: "player-settings"; settings: PlayerSettings }
