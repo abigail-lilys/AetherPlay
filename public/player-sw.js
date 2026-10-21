@@ -1,9 +1,10 @@
 const DB_NAME = "mvmz-browser-player";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const GAME_STORE = "games";
 const FILE_STORE = "files";
 const BLOB_STORE = "blobs";
 const HANDLE_STORE = "handles";
+const WOLF_SAVE_STORE = "wolfSaves"; // AETHER_SW_WOLF_SAVE_STORE_V1
 
 const PLAYER_DESKTOP_RUNTIME_VERSION = "desktop-api-9";
 const PLAYER_BRIDGE_RUNTIME_VERSION = "bridge-api-14";
@@ -55,7 +56,20 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin || !url.pathname.startsWith("/play/"))
     return;
 
-  event.respondWith(serveGameFile(url, event.request));
+  // AETHER_SW_ROUTE_ERROR_DETAILS_V1: surface route errors instead of a generic WebView net::ERR_FAILED page.
+  event.respondWith(
+    serveGameFile(url, event.request).catch((cause) => {
+      const detail = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+      console.error("[AetherPlay] Local game route failed:", detail);
+      return new Response(`AetherPlay local game route failed\n${detail}`, {
+        status: 500,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
+    }),
+  );
 });
 
 self.addEventListener("message", (event) => {
@@ -109,6 +123,11 @@ function openDb() {
         db.createObjectStore(BLOB_STORE, { keyPath: "key" });
       if (!db.objectStoreNames.contains(HANDLE_STORE))
         db.createObjectStore(HANDLE_STORE, { keyPath: "gameId" });
+      // Keep the schema in sync with src/lib/storage.ts when this worker upgrades the DB.
+      if (!db.objectStoreNames.contains(WOLF_SAVE_STORE)) {
+        const saves = db.createObjectStore(WOLF_SAVE_STORE, { keyPath: "key" });
+        saves.createIndex("gameId", "gameId", { unique: false });
+      }
     };
     request.onsuccess = () => {
       const db = request.result;
