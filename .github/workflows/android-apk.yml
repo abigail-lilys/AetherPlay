@@ -10,19 +10,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
 
-      - name: Setup Node.js and pnpm
-        uses: pnpm/setup@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          version: 11.7.0
-          runtime: node@22
-          cache: true
-          cache-dependency-path: pnpm-lock.yaml
-          install: false
+          node-version: 22
+          registry-url: https://registry.npmmirror.com
+
+      - name: Install pnpm
+        run: |
+          npm install -g pnpm@11.7.0
+          pnpm config set registry https://registry.npmmirror.com
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
