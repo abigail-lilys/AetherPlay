@@ -347,8 +347,9 @@ export function usePlayerController() {
   }, [library.activeGame?.id, textLog.reset]);
 
   useEffect(() => {
+    // Native Android uses this prefix to distinguish active gameplay from the library screen.
     document.title = library.activeGame
-      ? `${library.activeGame.title} | ${serviceTitle}`
+      ? `__AETHERPLAY_GAME_ACTIVE__:${library.activeGame.title} | ${serviceTitle}`
       : serviceTitle;
   }, [library.activeGame]);
 
