@@ -75,7 +75,8 @@ export type PlayerToParentMessage =
   | { type: "text-log"; gameId: string; text: string; at: number }
   | { type: "runtime-error"; message: string; stack?: string }
   | { type: "wolf-assets-request"; gameId: string; requestId: string }
-  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer };
+  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer }
+  | { type: "wolf-save-writeback-event"; gameId: string; event: string; path: string; details: string; at: number };
 
 export type ParentToPlayerMessage =
   | { type: "player-settings"; settings: PlayerSettings }

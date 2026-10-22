@@ -217,6 +217,16 @@ export function usePlayerController() {
       }
 
       const message = event.data;
+      if (message.type === "wolf-save-writeback-event") {
+        const activeGame = library.activeGame;
+        if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
+        const level = message.event.endsWith("ERROR") || message.event.includes("FAILED") ? "error"
+          : message.event.includes("WARNING") ? "warn" : "info";
+        logDiagnostic(level, `wolf.save.writeback.${message.event.toLowerCase()}`, {
+          gameId: message.gameId, path: message.path, details: message.details, at: message.at,
+        });
+        return;
+      }
       if (message.type === "wolf-save-written") {
         const activeGame = library.activeGame;
         if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;

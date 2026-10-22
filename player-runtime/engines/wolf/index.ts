@@ -464,11 +464,21 @@ function installAssetLoader(assets: WolfAsset[]) {
     }
   }
 
+  function reportWriteback(event: string, path: string, details: string): void {
+    try {
+      if (!config?.gameId) return;
+      window.parent.postMessage({
+        type: "wolf-save-writeback-event", gameId: config.gameId, event, path, details, at: Date.now(),
+      }, window.location.origin);
+    } catch { /* diagnostic messages must not affect gameplay */ }
+  }
+
   function installExternalSaveWriteback(): void {
     type AnyFn = (...args: unknown[]) => unknown;
-    type Mount = { mountpoint?: unknown; type?: Record<string, unknown> };
+    type MountRecord = { mountpoint?: unknown; type?: Record<string, unknown> };
     type RuntimeFs = Record<string, unknown> & {
-      mounts?: Mount[];
+      mounts?: MountRecord[];
+      mount?: AnyFn;
       syncfs?: AnyFn;
       readdir?: (path: string) => string[];
       analyzePath?: (path: string) => { exists: boolean };
@@ -476,12 +486,24 @@ function installAssetLoader(assets: WolfAsset[]) {
       stat?: (path: string) => { size?: number; mode?: number; mtime?: number };
     };
     const fs = FS as unknown as RuntimeFs;
-    const originalSyncfs = fs.syncfs;
-    if (typeof originalSyncfs !== "function") return;
+    if (typeof fs.syncfs !== "function") {
+      reportWriteback("FS_UNAVAILABLE", "FS.syncfs", "BrowserWoditor has no public FS.syncfs function");
+      return;
+    }
+
     const wrappedTypes = new WeakSet<object>();
     const sentFingerprints = new Map<string, string>();
+    let publishTimer: number | undefined;
+    let scannedCount = 0;
+    let publishCount = 0;
+
+    const normalizeMount = (value: unknown): string =>
+      String(value ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+    const isSaveMount = (value: unknown): boolean =>
+      /\/[^/]+-(?:GameCache|Save)$/iu.test(normalizeMount(value));
 
     const fingerprint = (bytes: Uint8Array): string => {
+      // Non-cryptographic change detector only; Android verifies bytes after write.
       let left = 0x811c9dc5;
       let right = 0x9e3779b9;
       for (let index = 0; index < bytes.length; index += 1) {
@@ -491,14 +513,19 @@ function installAssetLoader(assets: WolfAsset[]) {
       return `${bytes.length}:${left.toString(16)}:${right.toString(16)}`;
     };
 
-    let publishTimer: number | undefined;
     const publishSavesAfterSync = (): void => {
-      if (!config?.gameId || !fs.readdir || !fs.readFile || !fs.analyzePath) return;
-      // BrowserWoditor can touch both -GameCache/Save and -Save/Save. Wait until
-      // the mount callbacks settle, then prefer the newest copy (GameCache wins ties).
-      const candidates = new Map<string, { name: string; bytes: Uint8Array; rank: number; path: string }>();
+      if (!config?.gameId || !fs.readdir || !fs.readFile || !fs.analyzePath || !fs.stat) {
+        reportWriteback("SCAN_UNAVAILABLE", "/data0", "filesystem listing/stat/read functions unavailable");
+        return;
+      }
+      const candidates = new Map<string, {
+        name: string; bytes: Uint8Array; rank: number; path: string; mtime: number;
+      }>();
       try {
-        if (!fs.analyzePath("/data0").exists) return;
+        if (!fs.analyzePath("/data0").exists) {
+          reportWriteback("SCAN_NO_DATA0", "/data0", "virtual /data0 directory does not exist");
+          return;
+        }
         for (const rootName of fs.readdir("/data0")) {
           const rootMatch = rootName.match(/^([^/]+)-(GameCache|Save)$/iu);
           if (!rootMatch) continue;
@@ -511,77 +538,129 @@ function installAssetLoader(assets: WolfAsset[]) {
               if (!/^SaveData\d+\.sav$/iu.test(name)) continue;
               const path = `${saveDir}/${name}`;
               try {
-                // Refresh from SAF before exporting: otherwise startup sync could replace a newer external save with stale IDBFS bytes.
-                loadExternalSave(path);
+                // This is a writeback scan, not a load path. Do NOT call loadExternalSave here:
+                // it could replace the freshly written virtual bytes with an older SAF copy.
+                // External saves are imported by the FS.open/stat/lstat hooks before gameplay reads.
                 const source = fs.readFile(path);
-                const bytes = source instanceof Uint8Array ? Uint8Array.from(source) : Uint8Array.from(source, char => char.charCodeAt(0) & 255);
-                // Never replace a real external save with a transient empty file created during a save operation.
+                const bytes = source instanceof Uint8Array
+                  ? Uint8Array.from(source)
+                  : Uint8Array.from(source, character => character.charCodeAt(0) & 255);
+                // WOLF creates zero-byte placeholders while saving; never publish them.
                 if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) continue;
+                let mtime = 0;
+                try { mtime = Number(fs.stat(path).mtime ?? 0) || 0; } catch { /* rank is fallback */ }
                 const key = name.toLowerCase();
                 const previous = candidates.get(key);
-                // The running WOLF game writes under -GameCache. Prefer that copy when both mounts have a slot.
-                if (!previous || rank > previous.rank) candidates.set(key, { name, bytes, rank, path });
+                if (!previous || mtime > previous.mtime || (mtime === previous.mtime && rank > previous.rank)) {
+                  candidates.set(key, { name, bytes, rank, path, mtime });
+                }
               } catch (error) {
-                console.warn(`AetherPlay: could not inspect WOLF save ${path}`, error);
+                reportWriteback("SCAN_FILE_ERROR", path, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
               }
             }
           } catch (error) {
-            console.warn(`AetherPlay: could not list WOLF saves under ${saveDir}`, error);
+            reportWriteback("SCAN_DIR_ERROR", saveDir, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
           }
         }
+
+        scannedCount += 1;
+        reportWriteback("SCAN_COMPLETE", "/data0", `scan=${scannedCount} candidates=${candidates.size}`);
         for (const candidate of candidates.values()) {
           const relativePath = `Save/${candidate.name}`;
           const key = relativePath.toLowerCase();
           const valueFingerprint = fingerprint(candidate.bytes);
           if (sentFingerprints.get(key) === valueFingerprint) continue;
           sentFingerprints.set(key, valueFingerprint);
-          const data = candidate.bytes.buffer.slice(candidate.bytes.byteOffset, candidate.bytes.byteOffset + candidate.bytes.byteLength) as ArrayBuffer;
-          window.parent.postMessage({ type: "wolf-save-written", gameId: config.gameId, path: relativePath, data }, window.location.origin);
+          const data = candidate.bytes.buffer.slice(
+            candidate.bytes.byteOffset, candidate.bytes.byteOffset + candidate.bytes.byteLength,
+          ) as ArrayBuffer;
+          publishCount += 1;
+          reportWriteback("SAVE_PUBLISH", relativePath,
+            `bytes=${data.byteLength} source=${candidate.path} publish=${publishCount}`);
+          window.parent.postMessage({
+            type: "wolf-save-written", gameId: config.gameId, path: relativePath, data,
+          }, window.location.origin);
         }
       } catch (error) {
-        console.warn("AetherPlay: could not collect WOLF saves after IDBFS sync", error);
+        reportWriteback("SCAN_ERROR", "/data0", error instanceof Error ? `${error.name}: ${error.message}` : String(error));
       }
     };
+
     const scheduleSavePublish = (): void => {
       if (publishTimer !== undefined) window.clearTimeout(publishTimer);
+      // Let related writes to both IDBFS mounts finish before selecting the newest slot.
       publishTimer = window.setTimeout(() => {
         publishTimer = undefined;
         publishSavesAfterSync();
-      }, 450);
+      }, 350);
+    };
+
+    const installTypeHook = (typeValue: unknown, hint = ""): void => {
+      if (!typeValue || typeof typeValue !== "object") return;
+      const type = typeValue as Record<string, unknown>;
+      if (wrappedTypes.has(type)) return;
+      const oldSync = type.syncfs;
+      if (typeof oldSync !== "function") return;
+      wrappedTypes.add(type);
+      type.syncfs = function (...args: unknown[]): unknown {
+        const mountInfo = args[0] as { mountpoint?: unknown } | undefined;
+        const mountpoint = normalizeMount(mountInfo?.mountpoint ?? hint);
+        const populate = args[1] === true;
+        const callback = args[2];
+        if (!isSaveMount(mountpoint) || populate || typeof callback !== "function") {
+          return (oldSync as AnyFn).apply(type, args);
+        }
+        reportWriteback("IDBFS_SYNC_BEGIN", mountpoint, `populate=false`);
+        const nextArgs = args.slice();
+        nextArgs[2] = function (error?: unknown): unknown {
+          const message = error == null ? "" : error instanceof Error
+            ? `${error.name}: ${error.message}`
+            : (() => { try { return JSON.stringify(error); } catch { return String(error); } })();
+          if (error == null) {
+            reportWriteback("IDBFS_SYNC_DONE", mountpoint, "populate=false");
+            scheduleSavePublish();
+          } else {
+            reportWriteback("IDBFS_SYNC_ERROR", mountpoint, message);
+          }
+          return (callback as (error?: unknown) => unknown)(error);
+        };
+        return (oldSync as AnyFn).apply(type, nextArgs);
+      };
+      reportWriteback("MOUNT_HOOKED", hint || "IDBFS", "hooked per-mount syncfs");
     };
 
     const installMountHooks = (): void => {
       if (!Array.isArray(fs.mounts)) return;
-      for (const mount of fs.mounts) {
-        const type = mount?.type;
-        if (!type || typeof type !== "object" || wrappedTypes.has(type)) continue;
-        const sync = type.syncfs;
-        if (typeof sync !== "function") continue;
-        wrappedTypes.add(type);
-        type.syncfs = function (...args: unknown[]): unknown {
-          const mountInfo = args[0] as { mountpoint?: unknown } | undefined;
-          const mountpoint = String(mountInfo?.mountpoint ?? "").replace(/\/+$/, "");
-          const populate = args[1] === true;
-          const callback = args[2];
-          const isSaveMount = /\/[^/]+-(?:GameCache|Save)$/iu.test(mountpoint);
-          if (!isSaveMount || populate || typeof callback !== "function") {
-            return (sync as AnyFn).apply(type, args);
-          }
-          const nextArgs = args.slice();
-          nextArgs[2] = function (error?: unknown): unknown {
-            if (error == null) scheduleSavePublish();
-            return (callback as (error?: unknown) => unknown)(error);
-          };
-          return (sync as AnyFn).apply(type, nextArgs);
-        };
-      }
+      for (const mount of fs.mounts) installTypeHook(mount?.type, String(mount?.mountpoint ?? ""));
     };
 
+    // Critical fix: BrowserWoditor mounts IDBFS in its own preRun callback, after
+    // this player callback. Hook FS.mount so the IDBFS type is wrapped immediately
+    // when each real -Save/-GameCache mount is created. queuePersist calls IDBFS.syncfs
+    // directly, so wrapping only FS.syncfs before the mounts exist misses save writes.
+    const oldMount = fs.mount;
+    if (typeof oldMount === "function") {
+      fs.mount = function (...args: unknown[]): unknown {
+        const result = (oldMount as AnyFn).apply(FS, args);
+        const mountpoint = String(args[2] ?? "");
+        installTypeHook(args[0], mountpoint);
+        installMountHooks();
+        if (isSaveMount(mountpoint)) reportWriteback("MOUNT_CREATED", mountpoint, "FS.mount intercepted");
+        return result;
+      };
+    } else {
+      reportWriteback("MOUNT_HOOK_WARNING", "FS.mount", "FS.mount unavailable; using mount-list fallback");
+    }
+
+    const oldSyncfs = fs.syncfs;
     fs.syncfs = function (...args: unknown[]): unknown {
       installMountHooks();
-      return (originalSyncfs as AnyFn).apply(FS, args);
+      return (oldSyncfs as AnyFn).apply(FS, args);
     };
     installMountHooks();
+    window.setTimeout(installMountHooks, 0);
+    window.setTimeout(installMountHooks, 100);
+    reportWriteback("WRITEBACK_HOOK_INSTALLED", "BrowserWoditor IDBFS", "save writes will be published after successful per-mount IDBFS sync");
   }
 
   function load(path: unknown): boolean {
