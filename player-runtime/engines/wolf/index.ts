@@ -16,6 +16,7 @@ type WolfAssetResponse = {
   requestId: string;
   assets?: WolfAsset[];
   error?: string;
+  externalSaveRootRegistered?: boolean;
 };
 
 type WolfRuntimeModule = {
@@ -35,6 +36,9 @@ declare const FS: {
   open: (...values: unknown[]) => unknown;
   stat: (...values: unknown[]) => unknown;
   lstat: (...values: unknown[]) => unknown;
+  readdir?: (path: string) => string[];
+  unlink?: (path: string) => unknown;
+  write?: (...values: unknown[]) => unknown;
 };
 
 const config = (window as typeof window & {
@@ -42,6 +46,7 @@ const config = (window as typeof window & {
 }).__WOLF_PLAYER_CONFIG__;
 const runtimeModule = (window as typeof window & { Module?: WolfRuntimeModule }).Module ?? Module;
 let activeModule: WolfRuntimeModule | undefined;
+let externalSaveRootRegistered = false;
 
 // AetherPlay WOLF debug bridge. This snippet is inserted after activeModule is declared.
 type AetherDebugCommand = {
@@ -377,6 +382,7 @@ function requestAssets(settings: WolfPlayerConfig): Promise<WolfAsset[]> {
         reject(new Error("The browser player did not provide WOLF assets."));
         return;
       }
+      externalSaveRootRegistered = message.externalSaveRootRegistered === true;
       resolve(message.assets);
     }
 
@@ -416,9 +422,10 @@ function installAssetLoader(assets: WolfAsset[]) {
     }
   }
 
-  // Android external saves are the source of truth when the game folder has a SAF permission.
+  // Android external saves are authoritative when an SAF root is registered.
   const checkedExternalSavePaths = new Set<string>();
   let writingExternalSaveIntoVirtualFs = false;
+  let suppressExternalSaveReconcile = false;
 
   function externalSaveRelativePath(pathInput: unknown): string | undefined {
     const value = String(pathInput ?? "").replace(/\\/g, "/").replace(/\/+/g, "/");
@@ -427,14 +434,76 @@ function installAssetLoader(assets: WolfAsset[]) {
     return match ? `Save/${match[1]}` : undefined;
   }
 
+  function saveSlotKey(pathInput: unknown): string | undefined {
+    const normalized = String(pathInput ?? "").replace(/\\/g, "/").replace(/\/+/g, "/");
+    const match = normalized.match(/(?:^|\/)data0\/[^/]+-(?:Save|GameCache)\/Save\/(SaveData\d+\.sav)$/iu);
+    return match?.[1].toLowerCase();
+  }
+
+  function saveVirtualPaths(relativePath: string): string[] {
+    const fs = FS as unknown as {
+      readdir?: (path: string) => string[];
+      analyzePath?: (path: string) => { exists: boolean };
+    };
+    if (!fs.readdir || !fs.analyzePath || !fs.analyzePath("/data0").exists) return [];
+    const wanted = relativePath.split("/").pop()?.toLowerCase();
+    if (!wanted) return [];
+    const paths: string[] = [];
+    const oldSuppress = suppressExternalSaveReconcile;
+    suppressExternalSaveReconcile = true;
+    try {
+      for (const rootName of fs.readdir("/data0")) {
+        if (!/^[^/]+-(?:Save|GameCache)$/iu.test(rootName)) continue;
+        const saveDir = `/data0/${rootName}/Save`;
+        const names = fs.analyzePath(saveDir).exists ? fs.readdir(saveDir) : [];
+        const matches = names.filter((name) => name.toLowerCase() === wanted);
+        if (matches.length) {
+          for (const name of matches) paths.push(`${saveDir}/${name}`);
+        } else {
+          // Include both mount paths even if this mount has no Save directory/file yet;
+          // ensureParents() creates it when external bytes are imported.
+          paths.push(`${saveDir}/${relativePath.split("/").pop()}`);
+        }
+      }
+    } catch (error) {
+      console.warn("AetherPlay: could not enumerate virtual WOLF save copies", error);
+    } finally {
+      suppressExternalSaveReconcile = oldSuppress;
+    }
+    return [...new Set(paths.map((path) => path.replace(/\/+/g, "/")))];
+  }
+
+  function markExternalSaveCopiesChecked(relativePath: string): void {
+    for (const path of saveVirtualPaths(relativePath)) checkedExternalSavePaths.add(path.toLowerCase());
+  }
+
+  function removeCachedExternalSave(relativePath: string): number {
+    const fs = FS as unknown as {
+      analyzePath?: (path: string) => { exists: boolean };
+      unlink?: (path: string) => unknown;
+    };
+    let removed = 0;
+    if (!fs.analyzePath || !fs.unlink) return removed;
+    for (const path of saveVirtualPaths(relativePath)) {
+      try {
+        if (fs.analyzePath(path).exists) {
+          fs.unlink(path);
+          removed += 1;
+        }
+      } catch (error) {
+        console.warn(`AetherPlay: could not remove stale cached save ${path}`, error);
+      }
+    }
+    return removed;
+  }
+
   function loadExternalSave(pathInput: unknown): boolean {
-    if (writingExternalSaveIntoVirtualFs || !config?.gameId) return false;
+    if (writingExternalSaveIntoVirtualFs || !externalSaveRootRegistered || !config?.gameId) return false;
     const relativePath = externalSaveRelativePath(pathInput);
     if (!relativePath) return false;
     const virtualPath = `/${normalizeWolfPath(String(pathInput))}`;
     const checkKey = virtualPath.toLowerCase();
     if (checkedExternalSavePaths.has(checkKey)) return false;
-    checkedExternalSavePaths.add(checkKey);
 
     try {
       const encoded = relativePath.split("/").map(encodeURIComponent).join("/");
@@ -442,23 +511,50 @@ function installAssetLoader(assets: WolfAsset[]) {
       request.open("GET", `${window.location.origin}/__save__/${encodeURIComponent(config.gameId)}/${encoded}`, false);
       request.overrideMimeType("text/plain; charset=x-user-defined");
       request.send(null);
-      if (request.status < 200 || request.status >= 300) return false;
+      if (request.status === 404) {
+        // A definite SAF 404 means the external user deleted this slot. Remove every
+        // virtual mirror so startup cache scans cannot resurrect it.
+        const removed = removeCachedExternalSave(relativePath);
+        markExternalSaveCopiesChecked(relativePath);
+        checkedExternalSavePaths.add(checkKey);
+        reportWriteback("EXTERNAL_SAVE_MISSING", relativePath, `removedCachedCopies=${removed}`);
+        return false;
+      }
+      // Transient provider/network errors must remain retryable.
+      if (request.status < 200 || request.status >= 300) {
+        reportWriteback("EXTERNAL_SAVE_READ_RETRYABLE", relativePath, `HTTP ${request.status}`);
+        return false;
+      }
 
       const bytes = new Uint8Array(request.responseText.length);
       for (let index = 0; index < request.responseText.length; index += 1) {
         bytes[index] = request.responseText.charCodeAt(index) & 255;
       }
-      if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) return false;
-      ensureParents(virtualPath);
+      if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) {
+        reportWriteback("EXTERNAL_SAVE_INVALID", relativePath, `bytes=${bytes.byteLength}`);
+        return false;
+      }
+      const fs = FS as unknown as {
+        writeFile: (path: string, data: Uint8Array) => unknown;
+      };
+      const paths = saveVirtualPaths(relativePath);
+      if (!paths.length) paths.push(virtualPath);
       writingExternalSaveIntoVirtualFs = true;
       try {
-        FS.writeFile(virtualPath, bytes);
+        for (const path of paths) {
+          ensureParents(path);
+          fs.writeFile(path, bytes);
+        }
       } finally {
         writingExternalSaveIntoVirtualFs = false;
       }
-      console.info(`AetherPlay: loaded external WOLF save ${relativePath} (${bytes.byteLength} bytes)`);
+      markExternalSaveCopiesChecked(relativePath);
+      checkedExternalSavePaths.add(checkKey);
+      reportWriteback("EXTERNAL_SAVE_IMPORTED", relativePath, `bytes=${bytes.byteLength} copies=${paths.length}`);
       return true;
     } catch (error) {
+      reportWriteback("EXTERNAL_SAVE_READ_RETRYABLE", relativePath,
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error));
       console.warn("AetherPlay: could not read external WOLF save", error);
       return false;
     }
@@ -480,6 +576,8 @@ function installAssetLoader(assets: WolfAsset[]) {
       mounts?: MountRecord[];
       mount?: AnyFn;
       syncfs?: AnyFn;
+      write?: AnyFn;
+      writeFile?: AnyFn;
       readdir?: (path: string) => string[];
       analyzePath?: (path: string) => { exists: boolean };
       readFile?: (path: string) => Uint8Array | string;
@@ -492,18 +590,19 @@ function installAssetLoader(assets: WolfAsset[]) {
     }
 
     const wrappedTypes = new WeakSet<object>();
-    const sentFingerprints = new Map<string, string>();
+    const dirtySavePaths = new Set<string>();
+    const dirtySaveGeneration = new Map<string, number>();
+    const pendingWritebacks = new Map<string, { fingerprint: string; generation: number }>();
     let publishTimer: number | undefined;
     let scannedCount = 0;
     let publishCount = 0;
+    let insideWriteFile = false;
 
     const normalizeMount = (value: unknown): string =>
-      String(value ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+      String(value ?? "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "");
     const isSaveMount = (value: unknown): boolean =>
       /\/[^/]+-(?:GameCache|Save)$/iu.test(normalizeMount(value));
-
     const fingerprint = (bytes: Uint8Array): string => {
-      // Non-cryptographic change detector only; Android verifies bytes after write.
       let left = 0x811c9dc5;
       let right = 0x9e3779b9;
       for (let index = 0; index < bytes.length; index += 1) {
@@ -512,12 +611,80 @@ function installAssetLoader(assets: WolfAsset[]) {
       }
       return `${bytes.length}:${left.toString(16)}:${right.toString(16)}`;
     };
+    const markDirty = (pathInput: unknown, source: string): void => {
+      if (writingExternalSaveIntoVirtualFs || !externalSaveRootRegistered) return;
+      const slotKey = saveSlotKey(pathInput);
+      if (!slotKey) return;
+      const normalized = normalizeMount(pathInput);
+      const path = (normalized.startsWith("/") ? normalized : `/${normalized}`).toLowerCase();
+      dirtySavePaths.add(path);
+      const generation = (dirtySaveGeneration.get(slotKey) ?? 0) + 1;
+      dirtySaveGeneration.set(slotKey, generation);
+      reportWriteback("SAVE_DIRTY", String(pathInput), `slot=${slotKey} generation=${generation} source=${source}`);
+    };
 
+    // FS.write catches writes made through streams. The writeFile wrapper is also
+    // needed because some Emscripten builds route it through internal helpers.
+    const oldWrite = fs.write;
+    if (typeof oldWrite === "function") {
+      fs.write = function (...args: unknown[]): unknown {
+        const result = (oldWrite as AnyFn).apply(FS, args);
+        if (!insideWriteFile && !writingExternalSaveIntoVirtualFs) {
+          const stream = args[0] as { path?: unknown } | undefined;
+          const written = typeof result === "number" ? result : Number(args[3] ?? 0);
+          if (written > 0) markDirty(stream?.path, "FS.write");
+        }
+        return result;
+      };
+    }
+    const oldWriteFile = fs.writeFile;
+    if (typeof oldWriteFile === "function") {
+      fs.writeFile = function (...args: unknown[]): unknown {
+        const prior = insideWriteFile;
+        insideWriteFile = true;
+        let result: unknown;
+        try {
+          result = (oldWriteFile as AnyFn).apply(FS, args);
+        } finally {
+          insideWriteFile = prior;
+        }
+        if (!writingExternalSaveIntoVirtualFs) {
+          const data = args[1];
+          const length = data instanceof Uint8Array ? data.byteLength
+            : typeof data === "string" ? data.length : 0;
+          if (length > 0) markDirty(args[0], "FS.writeFile");
+        }
+        return result;
+      };
+    }
+
+    const oldReaddir = fs.readdir;
+    if (typeof oldReaddir === "function") {
+      fs.readdir = function (pathInput: string): string[] {
+        const path = normalizeMount(pathInput);
+        const names = (oldReaddir as AnyFn).apply(FS, [pathInput]) as string[];
+        if (suppressExternalSaveReconcile || !externalSaveRootRegistered ||
+            !/^\/data0\/[^/]+-(?:GameCache|Save)\/Save$/iu.test(path)) return names;
+        // A readdir is how save menus discover slots. Reconcile each cached slot
+        // before returning the listing, and return a fresh list after stale entries
+        // were removed or external bytes were imported.
+        for (const name of names.slice()) {
+          if (/^SaveData\d+\.sav$/iu.test(name)) loadExternalSave(`${path}/${name}`);
+        }
+        const refreshed = (oldReaddir as AnyFn).apply(FS, [pathInput]) as string[];
+        reportWriteback("EXTERNAL_SAVE_LIST_RECONCILED", path, `before=${names.length} after=${refreshed.length}`);
+        return refreshed;
+      };
+    }
+
+    let publishTimerGeneration = 0;
     const publishSavesAfterSync = (): void => {
-      if (!config?.gameId || !fs.readdir || !fs.readFile || !fs.analyzePath || !fs.stat) {
-        reportWriteback("SCAN_UNAVAILABLE", "/data0", "filesystem listing/stat/read functions unavailable");
+      if (!config?.gameId || !externalSaveRootRegistered || !fs.readdir || !fs.readFile || !fs.analyzePath || !fs.stat) {
+        reportWriteback("SCAN_SKIPPED", "/data0", externalSaveRootRegistered ? "filesystem listing/stat/read functions unavailable" : "external SAF root is not registered");
         return;
       }
+      const previousSuppress = suppressExternalSaveReconcile;
+      suppressExternalSaveReconcile = true;
       const candidates = new Map<string, {
         name: string; bytes: Uint8Array; rank: number; path: string; mtime: number;
       }>();
@@ -533,26 +700,28 @@ function installAssetLoader(assets: WolfAsset[]) {
           const saveDir = `${mountpoint}/Save`;
           try {
             if (!fs.analyzePath(saveDir).exists) continue;
-            const rank = rootMatch[2].toLowerCase() === "gamecache" ? 1 : 0;
+            // The readdir wrapper performs external reconciliation before yielding names.
             for (const name of fs.readdir(saveDir)) {
               if (!/^SaveData\d+\.sav$/iu.test(name)) continue;
               const path = `${saveDir}/${name}`;
+              const normalized = normalizeMount(path);
+              const normalizedPath = (normalized.startsWith("/") ? normalized : `/${normalized}`).toLowerCase();
+              const slotKey = name.toLowerCase();
+              // Critical safety rule: cached/IDBFS-restored files are not write intent.
+              // Publish only a file which the game actually wrote this session.
+              if (!dirtySavePaths.has(normalizedPath) || !dirtySaveGeneration.has(slotKey)) continue;
               try {
-                // This is a writeback scan, not a load path. Do NOT call loadExternalSave here:
-                // it could replace the freshly written virtual bytes with an older SAF copy.
-                // External saves are imported by the FS.open/stat/lstat hooks before gameplay reads.
                 const source = fs.readFile(path);
                 const bytes = source instanceof Uint8Array
                   ? Uint8Array.from(source)
                   : Uint8Array.from(source, character => character.charCodeAt(0) & 255);
-                // WOLF creates zero-byte placeholders while saving; never publish them.
                 if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) continue;
                 let mtime = 0;
                 try { mtime = Number(fs.stat(path).mtime ?? 0) || 0; } catch { /* rank is fallback */ }
-                const key = name.toLowerCase();
-                const previous = candidates.get(key);
+                const previous = candidates.get(slotKey);
+                const rank = rootMatch[2].toLowerCase() === "gamecache" ? 1 : 0;
                 if (!previous || mtime > previous.mtime || (mtime === previous.mtime && rank > previous.rank)) {
-                  candidates.set(key, { name, bytes, rank, path, mtime });
+                  candidates.set(slotKey, { name, bytes, rank, path, mtime });
                 }
               } catch (error) {
                 reportWriteback("SCAN_FILE_ERROR", path, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
@@ -564,36 +733,75 @@ function installAssetLoader(assets: WolfAsset[]) {
         }
 
         scannedCount += 1;
-        reportWriteback("SCAN_COMPLETE", "/data0", `scan=${scannedCount} candidates=${candidates.size}`);
-        for (const candidate of candidates.values()) {
+        reportWriteback("SCAN_COMPLETE", "/data0", `scan=${scannedCount} dirtySlots=${dirtySaveGeneration.size} candidates=${candidates.size}`);
+        for (const [slotKey, candidate] of candidates) {
           const relativePath = `Save/${candidate.name}`;
-          const key = relativePath.toLowerCase();
+          const generation = dirtySaveGeneration.get(slotKey);
+          if (generation === undefined) continue;
           const valueFingerprint = fingerprint(candidate.bytes);
-          if (sentFingerprints.get(key) === valueFingerprint) continue;
-          sentFingerprints.set(key, valueFingerprint);
+          const pending = pendingWritebacks.get(slotKey);
+          if (pending && pending.fingerprint === valueFingerprint && pending.generation === generation) continue;
+          pendingWritebacks.set(slotKey, { fingerprint: valueFingerprint, generation });
           const data = candidate.bytes.buffer.slice(
             candidate.bytes.byteOffset, candidate.bytes.byteOffset + candidate.bytes.byteLength,
           ) as ArrayBuffer;
           publishCount += 1;
           reportWriteback("SAVE_PUBLISH", relativePath,
-            `bytes=${data.byteLength} source=${candidate.path} publish=${publishCount}`);
+            `bytes=${data.byteLength} source=${candidate.path} generation=${generation} publish=${publishCount}`);
           window.parent.postMessage({
             type: "wolf-save-written", gameId: config.gameId, path: relativePath, data,
+            fingerprint: valueFingerprint, generation,
           }, window.location.origin);
         }
       } catch (error) {
         reportWriteback("SCAN_ERROR", "/data0", error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+      } finally {
+        // The writeback scan must never refresh external bytes over the just-written
+        // virtual file. Reconciliation happens on gameplay reads/listing instead.
+        suppressExternalSaveReconcile = previousSuppress;
       }
     };
 
     const scheduleSavePublish = (): void => {
       if (publishTimer !== undefined) window.clearTimeout(publishTimer);
-      // Let related writes to both IDBFS mounts finish before selecting the newest slot.
+      const scheduledGeneration = ++publishTimerGeneration;
       publishTimer = window.setTimeout(() => {
+        if (scheduledGeneration !== publishTimerGeneration) return;
         publishTimer = undefined;
         publishSavesAfterSync();
       }, 350);
     };
+
+    // Acknowledge only the exact pending write. Success clears dirty state only when
+    // no newer write to the same slot happened while the native SAF write was queued.
+    window.addEventListener("message", (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== window.parent ||
+          !event.data || typeof event.data !== "object") return;
+      const ack = event.data as {
+        type?: unknown; gameId?: unknown; path?: unknown; fingerprint?: unknown;
+        generation?: unknown; ok?: unknown; error?: unknown;
+      };
+      if (ack.type !== "wolf-save-writeback-ack" || ack.gameId !== config?.gameId) return;
+      const match = String(ack.path ?? "").match(/^Save\/(SaveData\d+\.sav)$/iu);
+      if (!match || typeof ack.fingerprint !== "string" || typeof ack.generation !== "number") return;
+      const slotKey = match[1].toLowerCase();
+      const pending = pendingWritebacks.get(slotKey);
+      if (!pending || pending.fingerprint !== ack.fingerprint || pending.generation !== ack.generation) return;
+      pendingWritebacks.delete(slotKey);
+      if (ack.ok === true && dirtySaveGeneration.get(slotKey) === ack.generation) {
+        for (const path of [...dirtySavePaths]) {
+          if (saveSlotKey(path) === slotKey) dirtySavePaths.delete(path);
+        }
+        dirtySaveGeneration.delete(slotKey);
+        reportWriteback("WRITEBACK_ACK", String(ack.path), `generation=${ack.generation} fingerprint=${ack.fingerprint}`);
+      } else if (ack.ok === true) {
+        reportWriteback("WRITEBACK_ACK_STALE", String(ack.path), `ackGeneration=${ack.generation} currentGeneration=${dirtySaveGeneration.get(slotKey) ?? -1}`);
+        scheduleSavePublish();
+      } else {
+        reportWriteback("WRITEBACK_ACK_FAILED", String(ack.path), String(ack.error ?? "native write failed; retry scheduled"));
+        window.setTimeout(scheduleSavePublish, 2000);
+      }
+    });
 
     const installTypeHook = (typeValue: unknown, hint = ""): void => {
       if (!typeValue || typeof typeValue !== "object") return;
@@ -610,7 +818,7 @@ function installAssetLoader(assets: WolfAsset[]) {
         if (!isSaveMount(mountpoint) || populate || typeof callback !== "function") {
           return (oldSync as AnyFn).apply(type, args);
         }
-        reportWriteback("IDBFS_SYNC_BEGIN", mountpoint, `populate=false`);
+        reportWriteback("IDBFS_SYNC_BEGIN", mountpoint, "populate=false");
         const nextArgs = args.slice();
         nextArgs[2] = function (error?: unknown): unknown {
           const message = error == null ? "" : error instanceof Error
@@ -634,10 +842,7 @@ function installAssetLoader(assets: WolfAsset[]) {
       for (const mount of fs.mounts) installTypeHook(mount?.type, String(mount?.mountpoint ?? ""));
     };
 
-    // Critical fix: BrowserWoditor mounts IDBFS in its own preRun callback, after
-    // this player callback. Hook FS.mount so the IDBFS type is wrapped immediately
-    // when each real -Save/-GameCache mount is created. queuePersist calls IDBFS.syncfs
-    // directly, so wrapping only FS.syncfs before the mounts exist misses save writes.
+    // BrowserWoditor creates these IDBFS mounts in its own preRun callback.
     const oldMount = fs.mount;
     if (typeof oldMount === "function") {
       fs.mount = function (...args: unknown[]): unknown {
@@ -660,7 +865,8 @@ function installAssetLoader(assets: WolfAsset[]) {
     installMountHooks();
     window.setTimeout(installMountHooks, 0);
     window.setTimeout(installMountHooks, 100);
-    reportWriteback("WRITEBACK_HOOK_INSTALLED", "BrowserWoditor IDBFS", "save writes will be published after successful per-mount IDBFS sync");
+    reportWriteback("WRITEBACK_HOOK_INSTALLED", "BrowserWoditor IDBFS",
+      "only files written by gameplay this session may be written to the external SAF folder");
   }
 
   function load(path: unknown): boolean {

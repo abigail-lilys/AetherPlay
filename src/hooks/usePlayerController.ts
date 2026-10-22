@@ -97,6 +97,7 @@ export function usePlayerController() {
     logDiagnostic("info", "wolf-assets.request.received", {
       gameId: game.id, requestId: message.requestId, entryPath: game.entryPath,
     });
+    let externalSaveRootRegistered = false;
     try {
       const value = await wolfAssetsForActiveGame();
       if (Capacitor.getPlatform() === "android") {
@@ -104,6 +105,7 @@ export function usePlayerController() {
           const folder = await getAndroidFolderHandle(game.id);
           if (folder?.treeUri) {
             await registerAndroidGameSaveRoot(game.id, folder.treeUri);
+            externalSaveRootRegistered = true;
             logDiagnostic("info", "wolf.save.external-root.registered", { gameId: game.id, folderName: folder.folderName });
           } else {
             logDiagnostic("warn", "wolf.save.external-root.unavailable", { gameId: game.id, reason: "No Android SAF folder permission is associated with this game." });
@@ -123,6 +125,7 @@ export function usePlayerController() {
           type: "wolf-assets-response",
           requestId: message.requestId,
           assets: value.assets,
+          externalSaveRootRegistered,
         },
         window.location.origin,
       );
@@ -230,15 +233,30 @@ export function usePlayerController() {
       if (message.type === "wolf-save-written") {
         const activeGame = library.activeGame;
         if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
+        const sendAck = (ok: boolean, error?: string) => {
+          const frame = player.frameRef.current?.contentWindow;
+          if (!frame || event.source !== frame) return;
+          frame.postMessage({
+            type: "wolf-save-writeback-ack", gameId: message.gameId, path: message.path,
+            fingerprint: message.fingerprint, generation: message.generation, ok, error,
+          }, window.location.origin);
+        };
         if (!(message.data instanceof ArrayBuffer) || message.data.byteLength === 0 || message.data.byteLength > 16 * 1024 * 1024) {
+          const error = `Invalid save payload (${message.data?.byteLength ?? "unknown"} bytes)`;
           logDiagnostic("warn", "wolf.save.external-write.rejected", { gameId: message.gameId, path: message.path, bytes: message.data?.byteLength });
+          sendAck(false, error);
           return;
         }
-        if (!/^Save\/SaveData\d+\.sav$/iu.test(message.path)) {
+        if (!/^Save\/SaveData\d+\.sav$/iu.test(message.path) ||
+            typeof message.fingerprint !== "string" || !Number.isSafeInteger(message.generation)) {
+          const error = "Invalid save path or writeback token";
           logDiagnostic("warn", "wolf.save.external-write.invalid-path", { gameId: message.gameId, path: message.path });
+          sendAck(false, error);
           return;
         }
         const task = wolfSaveWriteQueueRef.current.catch(() => undefined).then(async () => {
+          const latestGame = library.activeGame;
+          if (!latestGame || latestGame.id !== message.gameId) throw new Error("游戏已切换，取消旧游戏存档写回。");
           const folder = await getAndroidFolderHandle(message.gameId);
           if (!folder?.treeUri) throw new Error("没有可写入的 Android 游戏目录授权。");
           const result = await writeAndroidGameSave(
@@ -252,11 +270,16 @@ export function usePlayerController() {
           logDiagnostic("info", "wolf.save.external-write.completed", {
             gameId: message.gameId, path: result.relativePath,
             bytes: result.bytesWritten, sha256: result.sha256, folderName: folder.folderName,
+            fingerprint: message.fingerprint, generation: message.generation,
           });
+          sendAck(true);
         }).catch((cause) => {
+          const error = diagnosticErrorText(cause);
           logDiagnostic("error", "wolf.save.external-write.failed", {
-            gameId: message.gameId, path: message.path, error: diagnosticErrorText(cause),
+            gameId: message.gameId, path: message.path, error,
+            fingerprint: message.fingerprint, generation: message.generation,
           });
+          sendAck(false, error);
         });
         wolfSaveWriteQueueRef.current = task;
         return;
