@@ -430,7 +430,19 @@ function installAssetLoader(assets: WolfAsset[]) {
   // Avoid flooding runtime.log while directory reconciliation repeatedly sees a tombstoned slot.
   // Keep one log per slot and source, and reset these keys when the tombstone is released.
   const reportedExternalSaveDeleteGuardSources = new Set<string>();
-  const EXTERNAL_SAVE_DELETE_STARTUP_GUARD_MS = 30_000;
+  // Do not unlock a deleted slot just because time passed. Unlock only when a
+  // real FS.write follows recent user input after the deletion was observed.
+  let lastExternalSaveUserInputAt = 0;
+  let lastExternalSaveUserInputType = "none";
+  const EXTERNAL_SAVE_USER_INTENT_WINDOW_MS = 5_000;
+  const trackExternalSaveUserInput = (event: Event): void => {
+    lastExternalSaveUserInputAt = Date.now();
+    lastExternalSaveUserInputType = event.type;
+  };
+  window.addEventListener("pointerdown", trackExternalSaveUserInput, true);
+  window.addEventListener("touchstart", trackExternalSaveUserInput, true);
+  window.addEventListener("mousedown", trackExternalSaveUserInput, true);
+  window.addEventListener("keydown", trackExternalSaveUserInput, true);
   let writingExternalSaveIntoVirtualFs = false;
   let suppressExternalSaveReconcile = false;
 
@@ -643,7 +655,11 @@ function installAssetLoader(assets: WolfAsset[]) {
       if (externallyDeletedSaveSlots.has(slotKey)) {
         const deletedAt = externalSaveDeletedAt.get(slotKey) ?? Date.now();
         const ageMs = Date.now() - deletedAt;
-        if (ageMs < EXTERNAL_SAVE_DELETE_STARTUP_GUARD_MS) {
+        const inputAgeMs = Date.now() - lastExternalSaveUserInputAt;
+        const hasExplicitWriteIntent = source === "FS.write" &&
+          lastExternalSaveUserInputAt >= deletedAt && inputAgeMs >= 0 &&
+          inputAgeMs <= EXTERNAL_SAVE_USER_INTENT_WINDOW_MS;
+        if (!hasExplicitWriteIntent) {
           // Treat early FS.write/File operations as startup/cache replay. Unlink
           // both mirrors after the operation so the save list cannot show them.
           const relativePath = externalSaveRelativePath(pathInput);
@@ -652,12 +668,12 @@ function installAssetLoader(assets: WolfAsset[]) {
           if (!reportedExternalSaveDeleteGuardSources.has(guardLogKey)) {
             reportedExternalSaveDeleteGuardSources.add(guardLogKey);
             reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", String(pathInput),
-              `slot=${slotKey} ageMs=${ageMs} source=${source} removedCachedCopies=${removed}`);
+              `slot=${slotKey} ageMs=${ageMs} source=${source} inputAgeMs=${inputAgeMs} input=${lastExternalSaveUserInputType} removedCachedCopies=${removed}`);
           }
           return;
         }
-        // After the startup window, a new write is treated as deliberate creation
-        // of a replacement save by gameplay, and can be persisted normally.
+        // The player acted after deletion and the game now issued FS.write;
+        // release immediately rather than waiting for an arbitrary timeout.
         externallyDeletedSaveSlots.delete(slotKey);
         externalSaveDeletedAt.delete(slotKey);
         for (const loggedKey of [...reportedExternalSaveDeleteGuardSources]) {
