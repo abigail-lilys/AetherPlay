@@ -427,6 +427,9 @@ function installAssetLoader(assets: WolfAsset[]) {
   // A 404 is a deletion signal, not permission to restore an IDBFS copy.
   const externallyDeletedSaveSlots = new Set<string>();
   const externalSaveDeletedAt = new Map<string, number>();
+  // Avoid flooding runtime.log while directory reconciliation repeatedly sees a tombstoned slot.
+  // Keep one log per slot and source, and reset these keys when the tombstone is released.
+  const reportedExternalSaveDeleteGuardSources = new Set<string>();
   const EXTERNAL_SAVE_DELETE_STARTUP_GUARD_MS = 30_000;
   let writingExternalSaveIntoVirtualFs = false;
   let suppressExternalSaveReconcile = false;
@@ -510,8 +513,12 @@ function installAssetLoader(assets: WolfAsset[]) {
       // Also catch a stale IDBFS copy that appears AFTER the first 404 check.
       const removed = removeCachedExternalSave(relativePath);
       const deletedAt = externalSaveDeletedAt.get(deletedSlotKey) ?? Date.now();
-      reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", relativePath,
-        `ageMs=${Date.now() - deletedAt} removedCachedCopies=${removed} source=directory-reconcile`);
+      const guardLogKey = `${deletedSlotKey}:directory-reconcile`;
+      if (!reportedExternalSaveDeleteGuardSources.has(guardLogKey)) {
+        reportedExternalSaveDeleteGuardSources.add(guardLogKey);
+        reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", relativePath,
+          `ageMs=${Date.now() - deletedAt} removedCachedCopies=${removed} source=directory-reconcile`);
+      }
       return false;
     }
     const virtualPath = `/${normalizeWolfPath(String(pathInput))}`;
@@ -641,14 +648,21 @@ function installAssetLoader(assets: WolfAsset[]) {
           // both mirrors after the operation so the save list cannot show them.
           const relativePath = externalSaveRelativePath(pathInput);
           const removed = relativePath ? removeCachedExternalSave(relativePath) : 0;
-          reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", String(pathInput),
-            `slot=${slotKey} ageMs=${ageMs} source=${source} removedCachedCopies=${removed}`);
+          const guardLogKey = `${slotKey}:${source}`;
+          if (!reportedExternalSaveDeleteGuardSources.has(guardLogKey)) {
+            reportedExternalSaveDeleteGuardSources.add(guardLogKey);
+            reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", String(pathInput),
+              `slot=${slotKey} ageMs=${ageMs} source=${source} removedCachedCopies=${removed}`);
+          }
           return;
         }
         // After the startup window, a new write is treated as deliberate creation
         // of a replacement save by gameplay, and can be persisted normally.
         externallyDeletedSaveSlots.delete(slotKey);
         externalSaveDeletedAt.delete(slotKey);
+        for (const loggedKey of [...reportedExternalSaveDeleteGuardSources]) {
+          if (loggedKey.startsWith(`${slotKey}:`)) reportedExternalSaveDeleteGuardSources.delete(loggedKey);
+        }
         reportWriteback("EXTERNAL_SAVE_DELETE_GUARD_RELEASED", String(pathInput),
           `slot=${slotKey} ageMs=${ageMs} source=${source}; treating as a new save`);
       }
