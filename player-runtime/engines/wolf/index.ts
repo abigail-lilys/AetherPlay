@@ -27,6 +27,7 @@ type WolfRuntimeModule = {
 import { normalizeWolfPath, wolfPathKeys } from "@/player-runtime/engines/wolf/path";
 import { installWolfCompatibility } from "@/player-runtime/engines/wolf/compatibility";
 import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibility";
+import { createWasmMemoryScanner, type WasmScanFilter, type WasmScanType } from "@/player-runtime/engines/wolf/memoryScanner";
 
 declare const Module: WolfRuntimeModule;
 declare const FS: {
@@ -53,10 +54,17 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "list-files" | "read-file" | "write-file";
+  command: "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
   path?: string;
   format?: "text" | "hex";
   content?: string;
+  scanType?: WasmScanType;
+  scanValue?: number;
+  scanFilter?: WasmScanFilter;
+  page?: number;
+  aligned?: boolean;
+  offset?: number;
+  value?: number;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -72,6 +80,9 @@ type AetherDebugResponse = {
   truncated?: boolean;
   file?: { path: string; size: number; format: "text" | "hex"; content: string };
   backupPath?: string;
+  scan?: { scanType: WasmScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; results: Array<{ offset: number; value: number }> };
+  memoryValue?: number;
+  frozenCount?: number;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -195,6 +206,14 @@ function aetherDebugInstallWasmCapture(): void {
 }
 
 aetherDebugInstallWasmCapture();
+function aetherDebugGetMemoryBuffer(): ArrayBufferLike | undefined {
+  const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
+  const heap = module?.HEAPU8 instanceof Uint8Array ? module.HEAPU8 : undefined;
+  const moduleMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory ? module.wasmMemory : undefined;
+  const buffer = aetherDebugCapturedMemory?.buffer ?? moduleMemory?.buffer ?? heap?.buffer;
+  return buffer && buffer.byteLength > 0 ? buffer : undefined;
+}
+const aetherDebugScanner = createWasmMemoryScanner(aetherDebugGetMemoryBuffer);
 function aetherDebugNormalizePath(value: string): string {
   if (typeof value !== "string" || value.length > 2048 || value.includes("\0")) throw new Error("无效文件路径。");
   const parts: string[] = [];
@@ -294,13 +313,13 @@ function aetherDebugWriteFile(message: AetherDebugCommand): { backupPath: string
 function aetherDebugRespond(response: AetherDebugResponse) {
   window.parent.postMessage(response, window.location.origin);
 }
-window.addEventListener("message", (event: MessageEvent<unknown>) => {
+window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   if (event.origin !== window.location.origin || event.source !== window.parent) return;
   if (!event.data || typeof event.data !== "object") return;
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file") return;
+  if (!command || (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
   try {
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -313,7 +332,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
         ? module.wasmMemory
         : undefined;
       const memory = aetherDebugCapturedMemory ?? moduleMemory;
-      const memoryBuffer = heapU8?.buffer ?? memory?.buffer;
+      const memoryBuffer = aetherDebugGetMemoryBuffer();
       const fs = FS as unknown as Partial<AetherDebugFS>;
       aetherDebugRespond({
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true,
@@ -340,6 +359,42 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       const file = aetherDebugReadFile(message.path || "/");
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, file });
       return;
+    }
+    if (command === "scan-first") {
+      const scan = await aetherDebugScanner.firstScan(message.scanType as WasmScanType, Number(message.scanValue), message.aligned !== false);
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
+    }
+    if (command === "scan-next") {
+      const scan = await aetherDebugScanner.nextScan(message.scanFilter as WasmScanFilter, message.scanValue === undefined ? undefined : Number(message.scanValue));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
+    }
+    if (command === "scan-page") {
+      const scan = aetherDebugScanner.getPage(Number(message.page));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
+    }
+    if (command === "scan-reset") {
+      aetherDebugScanner.resetScan();
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, frozenCount: aetherDebugScanner.frozenCount() }); return;
+    }
+    if (command === "memory-read") {
+      const memoryValue = aetherDebugScanner.read(message.scanType as WasmScanType, Number(message.offset));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, memoryValue }); return;
+    }
+    if (command === "memory-write") {
+      const memoryValue = aetherDebugScanner.write(message.scanType as WasmScanType, Number(message.offset), Number(message.value));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, memoryValue }); return;
+    }
+    if (command === "freeze-add") {
+      const frozenCount = aetherDebugScanner.freezeAdd(message.scanType as WasmScanType, Number(message.offset), Number(message.value));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, frozenCount }); return;
+    }
+    if (command === "freeze-remove") {
+      const frozenCount = aetherDebugScanner.freezeRemove(message.scanType as WasmScanType, Number(message.offset));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, frozenCount }); return;
+    }
+    if (command === "freeze-clear") {
+      aetherDebugScanner.freezeClear();
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, frozenCount: 0 }); return;
     }
     const result = aetherDebugWriteFile(message as AetherDebugCommand);
     aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, ...result });

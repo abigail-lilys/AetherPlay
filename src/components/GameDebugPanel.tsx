@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 
-type DebugCommand = "probe" | "list-files" | "read-file" | "write-file";
+type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
 type DebugTab = "overview" | "files" | "memory";
 type DebugFormat = "text" | "hex";
+type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
+type DebugScanFilter = "changed" | "unchanged" | "increased" | "decreased" | "equal";
+interface DebugScanResult { offset: number; value: number }
+interface DebugScanSummary { scanType: DebugScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; results: DebugScanResult[] }
+interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
 
 interface DebugEntry {
   name: string;
@@ -44,12 +49,11 @@ interface DebugResponse {
   truncated?: boolean;
   file?: DebugFile;
   backupPath?: string;
+  scan?: DebugScanSummary;
+  memoryValue?: number;
+  frozenCount?: number;
 }
-interface DebugRequestArgs {
-  path?: string;
-  format?: DebugFormat;
-  content?: string;
-}
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanFilter?: DebugScanFilter; page?: number; aligned?: boolean; offset?: number; value?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -103,6 +107,14 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [scanType, setScanType] = useState<DebugScanType>("i32");
+  const [scanValue, setScanValue] = useState("100");
+  const [scanFilter, setScanFilter] = useState<DebugScanFilter>("changed");
+  const [alignedScan, setAlignedScan] = useState(true);
+  const [scanSummary, setScanSummary] = useState<DebugScanSummary | null>(null);
+  const [scanResults, setScanResults] = useState<DebugScanResult[]>([]);
+  const [rowValues, setRowValues] = useState<Record<number, string>>({});
+  const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -113,7 +125,7 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, 8000);
+      }, command === "scan-first" || command === "scan-next" ? 120000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -230,6 +242,87 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
     }
   };
 
+  const readScanValue = () => {
+    const parsed = Number(scanValue);
+    if (scanValue.trim() === "" || !Number.isFinite(parsed)) throw new Error("请输入有效数值。");
+    return parsed;
+  };
+  const applyScanResponse = (response: DebugResponse) => {
+    if (!response.scan) throw new Error("运行时没有返回扫描结果。");
+    setScanSummary(response.scan); setScanResults(response.scan.results || []); setRowValues({});
+    setScanType(response.scan.scanType); setNotice(`扫描完成：${response.scan.count.toLocaleString()} 个候选地址。`);
+  };
+  const runFirstScan = async () => {
+    let value: number;
+    try { value = readScanValue(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
+    setBusy("正在分块扫描 WASM 内存…"); setError(""); setNotice("");
+    try { applyScanResponse(await request("scan-first", { scanType, scanValue: value, aligned: alignedScan })); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const loadScanPage = async (page: number) => {
+    if (!scanSummary || page < 0 || page >= scanSummary.pageCount || page === scanSummary.page) return;
+    setBusy("正在读取扫描结果页…"); setError("");
+    try {
+      const response = await request("scan-page", { page });
+      if (!response.scan) throw new Error("运行时没有返回扫描结果页。");
+      setScanSummary(response.scan); setScanResults(response.scan.results || []); setRowValues({});
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const runNextScan = async () => {
+    let value: number | undefined;
+    if (scanFilter === "equal") {
+      try { value = readScanValue(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
+    }
+    setBusy("正在筛选候选地址…"); setError(""); setNotice("");
+    try { applyScanResponse(await request("scan-next", { scanFilter, scanValue: value })); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const resetScan = async () => {
+    setBusy("正在重置扫描…"); setError("");
+    try { await request("scan-reset"); setScanSummary(null); setScanResults([]); setRowValues({}); setNotice("已重置搜索，可以更换类型并开始新的首次扫描。"); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const writeMemoryResult = async (result: DebugScanResult) => {
+    const type = scanSummary?.scanType; if (!type) return;
+    const text = rowValues[result.offset] ?? String(result.value), value = Number(text);
+    if (text.trim() === "" || !Number.isFinite(value)) { setError("请输入有效写入值。"); return; }
+    setBusy(`正在写入 0x${result.offset.toString(16)}…`); setError(""); setNotice("");
+    try {
+      const response = await request("memory-write", { scanType: type, offset: result.offset, value }), actual = response.memoryValue ?? value;
+      setScanResults((old) => old.map((item) => item.offset === result.offset ? { ...item, value: actual } : item));
+      setRowValues((old) => ({ ...old, [result.offset]: String(actual) }));
+      setFrozenResults((old) => old.map((item) => item.offset === result.offset && item.type === type ? { ...item, value: actual } : item));
+      setNotice(`已写入 0x${result.offset.toString(16)} = ${actual}。`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const toggleFreeze = async (result: DebugScanResult) => {
+    const type = scanSummary?.scanType; if (!type) return;
+    const key = `${type}:${result.offset}`, existing = frozenResults.find((item) => item.key === key);
+    setBusy(existing ? "正在解除数值锁定…" : "正在锁定数值…"); setError(""); setNotice("");
+    try {
+      if (existing) {
+        await request("freeze-remove", { scanType: type, offset: result.offset }); setFrozenResults((old) => old.filter((item) => item.key !== key)); setNotice("已解除该地址的数值锁定。");
+      } else {
+        const text = rowValues[result.offset] ?? String(result.value), value = Number(text);
+        if (text.trim() === "" || !Number.isFinite(value)) throw new Error("请输入有效的锁定值。");
+        await request("freeze-add", { scanType: type, offset: result.offset, value });
+        setFrozenResults((old) => [...old.filter((item) => item.key !== key), { key, type, offset: result.offset, value }]);
+        setScanResults((old) => old.map((item) => item.offset === result.offset ? { ...item, value } : item));
+        setRowValues((old) => ({ ...old, [result.offset]: String(value) })); setNotice(`已锁定 0x${result.offset.toString(16)} = ${value}。`);
+      }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const removeFreeze = async (item: DebugFreezeEntry) => {
+    setBusy("正在解除数值锁定…"); setError("");
+    try { await request("freeze-remove", { scanType: item.type, offset: item.offset }); setFrozenResults((old) => old.filter((entry) => entry.key !== item.key)); setNotice(`已解除 0x${item.offset.toString(16)} 的锁定。`); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const clearFreezes = async () => {
+    setBusy("正在解除所有数值锁定…"); setError("");
+    try { await request("freeze-clear"); setFrozenResults([]); setNotice("已解除全部数值锁定。"); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+
   const tabButton = (value: DebugTab, label: string) => (
     <button key={value} type="button" onClick={() => { setTab(value); setError(""); }}
       style={{ ...buttonStyle, flex: 1, background: tab === value ? "#28528a" : "#182335", borderColor: tab === value ? "#5e9ce9" : "#354258" }}>
@@ -253,7 +346,7 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
           <button type="button" onClick={onClose} style={buttonStyle} aria-label="关闭调试台">关闭 ✕</button>
         </div>
         <nav style={{ display: "flex", gap: 8, marginTop: 13 }}>
-          {tabButton("overview", "概览")}{tabButton("files", "虚拟文件")}{tabButton("memory", "内存能力")}
+          {tabButton("overview", "概览")}{tabButton("files", "虚拟文件")}{tabButton("memory", "内存修改")}
         </nav>
       </header>
 
@@ -265,7 +358,7 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
         {tab === "overview" ? (
           <section style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>运行时连接</div>
-            <div style={subtleStyle}>此版本先实现 WOLF 运行时探测与虚拟文件调试。内存扫描会在能力确认后单独启用。</div>
+            <div style={subtleStyle}>此版本支持 WOLF 运行时探测、虚拟文件备份编辑，以及 WASM 数值扫描、复筛、写入和锁定。</div>
             <div style={{ marginTop: 12 }}>
               {infoRow("运行时", capabilities?.moduleAvailable ? "已找到模块" : "尚未确认")}
               {infoRow("虚拟文件系统", capabilities?.filesystemAvailable ? "可访问" : "未开放或尚未就绪")}
@@ -281,24 +374,70 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
         ) : null}
 
         {tab === "memory" ? (
-          <section style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>Wasm 内存接口探测</div>
-            <div style={{ ...subtleStyle, marginTop: 5, marginBottom: 12 }}>这里只报告运行时真实暴露的接口；不假定变量布局，也不会自动写入内存。</div>
-            {infoRow("HEAPU8", capabilities?.heapU8 ? "可用" : "未暴露")}
-            {infoRow("HEAP32", capabilities?.heap32 ? "可用" : "未暴露")}
-            {infoRow("HEAPF32", capabilities?.heapF32 ? "可用" : "未暴露")}
-            {infoRow("HEAPF64", capabilities?.heapF64 ? "可用" : "未暴露")}
-            {infoRow("wasmMemory", capabilities?.wasmMemory ? "可用" : "未暴露")}
-            {infoRow("捕获钩子", capabilities?.wasmCaptureHookInstalled ? "已安装" : "未安装")}
-            {infoRow("WASM 实例化调用次数", String(capabilities?.wasmInstantiateCalls ?? 0))}
-            {infoRow("内存来源", capabilities?.wasmMemorySource || "未知")}
-            <div style={{ marginTop: 14, border: "1px dashed #45536a", borderRadius: 10, padding: 12 }}>
-              <div style={{ fontWeight: 650, fontSize: 13 }}>数值扫描器：尚未启用</div>
-              <div style={{ ...subtleStyle, marginTop: 5 }}>下一阶段会先验证候选地址筛选与写入闭环，再开放等于、增大、减小、变化/不变筛选。</div>
+          <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>WASM 内存扫描与修改</div>
+              <div style={{ ...subtleStyle, marginTop: 5 }}>输入游戏中显示的数值进行首次扫描；回到游戏改变数值，再按变化条件复筛。地址是当前游戏实例内的字节偏移，重启游戏后通常需要重新扫描。</div>
+              {infoRow("可用内存", capabilities?.memoryAvailable ? formatBytes(capabilities.heapBytes) : "尚未探测到")}
+              {infoRow("内存来源", capabilities?.wasmMemorySource || "未知")}
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 8, marginTop: 12 }}>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>数值类型
+                  <select value={scanType} disabled={Boolean(scanSummary)} onChange={(event) => setScanType(event.target.value as DebugScanType)} style={inputStyle}>
+                    <option value="i32">Int32（常见整数）</option><option value="u32">UInt32</option><option value="i16">Int16</option><option value="u16">UInt16</option><option value="i8">Int8</option><option value="u8">UInt8</option><option value="f32">Float32（小数）</option><option value="f64">Float64</option>
+                  </select>
+                </label>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>首次搜索的显示值
+                  <input inputMode="decimal" value={scanValue} onChange={(event) => setScanValue(event.target.value)} placeholder="例如 100" style={inputStyle}/>
+                </label>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, ...subtleStyle }}><input type="checkbox" checked={alignedScan} disabled={Boolean(scanSummary)} onChange={(event) => setAlignedScan(event.target.checked)}/>仅扫描对齐地址（更快；找不到时可关闭）</label>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void runFirstScan()} style={{ ...buttonStyle, flex: 1, background: "#245c4b", borderColor: "#397c66" }}>首次扫描</button>
+                <button type="button" disabled={Boolean(busy) || !scanSummary} onClick={() => void resetScan()} style={{ ...buttonStyle, flex: 1 }}>重置搜索</button>
+              </div>
+            </div>
+            {scanSummary ? (
+              <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}><div style={{ fontWeight: 700, fontSize: 14 }}>候选地址：{scanSummary.count.toLocaleString()}</div><div style={subtleStyle}>显示前 {scanResults.length} 个</div></div>
+                <div style={{ ...subtleStyle, marginTop: 4 }}>类型 {scanSummary.scanType} · 已扫描 {formatBytes(scanSummary.scannedBytes)} · {scanSummary.aligned ? "对齐扫描" : "逐字节扫描"}</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
+                  <button type="button" disabled={Boolean(busy) || scanSummary.page <= 0} onClick={() => void loadScanPage(scanSummary.page - 1)} style={buttonStyle}>上一页</button>
+                  <span style={subtleStyle}>第 {scanSummary.page + 1} / {scanSummary.pageCount} 页，每页最多 200 项</span>
+                  <button type="button" disabled={Boolean(busy) || scanSummary.page + 1 >= scanSummary.pageCount} onClick={() => void loadScanPage(scanSummary.page + 1)} style={buttonStyle}>下一页</button>
+                </div>
+                {scanSummary.truncated ? <div style={{ color: "#ffd28a", fontSize: 12, marginTop: 7 }}>匹配数量超过 50,000 个，当前只保留前 50,000 个候选；建议缩小数值范围后重新扫描。</div> : null}
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, marginTop: 12 }}>
+                  <select value={scanFilter} onChange={(event) => setScanFilter(event.target.value as DebugScanFilter)} style={inputStyle}><option value="changed">已变化</option><option value="unchanged">未变化</option><option value="increased">数值增大</option><option value="decreased">数值减小</option><option value="equal">等于输入值</option></select>
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void runNextScan()} style={buttonStyle}>再次筛选</button>
+                </div>
+                <div style={{ ...subtleStyle, marginTop: 6 }}>选择变化条件后，回到游戏做一次会改变目标数值的操作，再回来复筛。</div>
+              </div>
+            ) : null}
+            {scanSummary && scanResults.length > 0 ? (
+              <div style={{ border: "1px solid #253247", borderRadius: 12, overflow: "hidden" }}>
+                {scanResults.map((result) => {
+                  const type = scanSummary.scanType, rowKey = `${type}:${result.offset}`, isFrozen = frozenResults.some((item) => item.key === rowKey);
+                  return <div key={rowKey} style={{ padding: 10, borderBottom: "1px solid #202b3a", background: "#0f1722" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, marginBottom: 7 }}><code style={{ color: "#9fc6ff" }}>0x{result.offset.toString(16).padStart(8, "0")}</code><span style={{ color: "#dce8f8" }}>{String(result.value)}</span></div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input aria-label={`地址 0x${result.offset.toString(16)} 新值`} inputMode="decimal" value={rowValues[result.offset] ?? String(result.value)} onChange={(event) => setRowValues((old) => ({ ...old, [result.offset]: event.target.value }))} style={{ ...inputStyle, minWidth: 0, flex: 1, padding: 8 }}/>
+                      <button type="button" disabled={Boolean(busy)} onClick={() => void writeMemoryResult(result)} style={{ ...buttonStyle, padding: "8px 9px" }}>写入</button>
+                      <button type="button" disabled={Boolean(busy)} onClick={() => void toggleFreeze(result)} style={{ ...buttonStyle, padding: "8px 9px", background: isFrozen ? "#583a28" : "#182335", borderColor: isFrozen ? "#a97848" : "#354258" }}>{isFrozen ? "解锁" : "锁定"}</button>
+                    </div>
+                  </div>;
+                })}
+              </div>
+            ) : null}
+            {scanSummary && scanResults.length === 0 ? <div style={{ ...subtleStyle, padding: 12, border: "1px dashed #45536a", borderRadius: 10 }}>没有匹配地址。请确认输入类型和值；也可以关闭对齐扫描后重试。</div> : null}
+            <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}><div style={{ fontSize: 14, fontWeight: 700 }}>已锁定数值（{frozenResults.length}）</div><button type="button" disabled={Boolean(busy) || frozenResults.length === 0} onClick={() => void clearFreezes()} style={buttonStyle}>全部解除</button></div>
+              {frozenResults.length === 0 ? <div style={{ ...subtleStyle, marginTop: 7 }}>锁定后，运行时每 100 ms 尝试写回目标值。关闭调试面板不会自动解除锁定；可在这里解除或重启游戏。</div> : null}
+              {frozenResults.map((item) => <div key={item.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, borderTop: "1px solid #253247", paddingTop: 8, marginTop: 8 }}>
+                <div style={{ minWidth: 0, fontSize: 12, overflowWrap: "anywhere" }}><code>0x{item.offset.toString(16).padStart(8, "0")}</code><div style={subtleStyle}>{item.type} = {item.value}</div></div><button type="button" disabled={Boolean(busy)} onClick={() => void removeFreeze(item)} style={buttonStyle}>解除</button>
+              </div>)}
             </div>
           </section>
         ) : null}
-
         {tab === "files" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -335,7 +474,7 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
         ) : null}
       </main>
       <footer style={{ padding: "8px 14px max(10px, env(safe-area-inset-bottom, 0px))", borderTop: "1px solid #263449", background: "#0e1621", ...subtleStyle }}>
-        修改仅作用于当前游戏运行时的虚拟文件系统；请保留独立存档。调试器不会联网上传游戏数据。
+        修改仅作用于当前游戏实例。内存地址会随运行变化；写入前请保存游戏，锁定的值可在调试面板中解除，重启游戏也会清除本次内存锁定。
       </footer>
     </div>
   );
