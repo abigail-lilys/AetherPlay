@@ -619,34 +619,43 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
     }
     if (restoredCount) console.info(`AetherPlay: restored ${restoredCount} persistent WOLF save file(s).`);
 
-    // AETHER_WOLF_SAVE_TRACE_V1: temporary, read-only trace of actual WOLF save paths.
-    // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1
-    // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1
+    // AETHER_WOLF_SAVE_TRACE_V2: only save files; identify each actual IDBFS mount.
     {
       type TraceFn = (...args: unknown[]) => unknown;
-      const traceFs = FS as unknown as Record<string, TraceFn>;
+      type TraceMount = { mountpoint?: unknown; type?: Record<string, unknown> };
+      const traceFs = FS as unknown as Record<string, unknown>;
       const traceGameId = config?.gameId;
       let traceCount = 0;
-      let syncTraceCount = 0;
-      const traceLimit = 100;
+      let syncSequence = 0;
+      const traceLimit = 240;
       const streamTrace = new WeakMap<object, { path: string; writes: number; bytes: number; flags: string }>();
+      const wrappedMountTypes = new WeakSet<object>();
 
-      const isSavePath = (value: unknown): boolean => {
-        if (typeof value !== "string") return false;
-        const path = value.replace(/\\/g, "/").toLowerCase();
-        // GameCache normally contains transient assets, but its Save/ subtree is active game data.
-        if (path.includes("-gamecache/") && !/-gamecache\/save\//u.test(path)) return false;
-        return path.includes("-save/")
-          || /(?:^|\/)save(?:\/|$)/u.test(path)
-          || /(?:^|\/)savedata\d*[^/]*\.(?:sav|save)$/u.test(path)
-          || /\.(?:sav|save|wolfsave)$/u.test(path);
+      const normalizeTracePath = (value: unknown): string =>
+        String(value ?? "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "").toLowerCase();
+
+      // Keep file tracing limited to actual save-like files. Do not count failed
+      // probes for Game.ini.wolfx, Data.wolf, images, fonts, or other game assets.
+      const isSaveFile = (value: unknown): boolean => {
+        const path = normalizeTracePath(value);
+        const inSaveArea = path.includes("-save/")
+          || path.includes("-gamecache/save/")
+          || /(?:^|\/)save(?:\/|$)/u.test(path);
+        const saveExtension = /\.(?:sav|save|wolfsave)$/u.test(path);
+        const saveSlotName = /(?:^|\/)savedata\d+[^/]*$/u.test(path);
+        return inSaveArea && (saveExtension || saveSlotName);
+      };
+
+      const isSaveMount = (value: unknown): boolean => {
+        const path = normalizeTracePath(value);
+        return /(?:^|\/)[^/]+-(?:save|gamecache)$/u.test(path);
       };
 
       const emitTrace = (eventName: string, path: string, details = "") => {
         if (traceCount >= traceLimit || !traceGameId) return;
         traceCount += 1;
         const line = `[SAVE-TRACE] ${eventName} ${path}${details ? ` | ${details}` : ""}`;
-        try { console.info(line); } catch { /* diagnostics must never break the game */ }
+        try { console.info(line); } catch { /* tracing must never break the game */ }
         try {
           window.parent.postMessage({
             type: "wolf-save-trace", gameId: traceGameId,
@@ -655,10 +664,57 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
         } catch { /* parent logging is optional */ }
       };
 
-      const oldOpen = traceFs.open;
-      if (typeof oldOpen === "function") {
+      const asTraceFn = (value: unknown): TraceFn | undefined =>
+        typeof value === "function" ? value as TraceFn : undefined;
+
+      // FS.syncfs() synchronizes every mounted filesystem. Instrument the
+      // per-mount IDBFS syncfs callback so the log names the actual mountpoint.
+      const installMountSyncHooks = () => {
+        const mounts = traceFs.mounts;
+        if (!Array.isArray(mounts)) return;
+        for (const item of mounts as TraceMount[]) {
+          const type = item?.type;
+          if (!type || typeof type !== "object" || wrappedMountTypes.has(type)) continue;
+          const oldMountSync = asTraceFn(type.syncfs);
+          if (!oldMountSync) continue;
+          wrappedMountTypes.add(type);
+          type.syncfs = function (...args: unknown[]): unknown {
+            const mountArg = args[0] as { mountpoint?: unknown } | undefined;
+            const mountPath = String(mountArg?.mountpoint ?? "unknown-mount");
+            const populate = args[1] === true;
+            const callback = args[2];
+            if (!isSaveMount(mountPath) || typeof callback !== "function") {
+              return oldMountSync.apply(type, args);
+            }
+            const sequence = ++syncSequence;
+            emitTrace("IDBFS_SYNC_BEGIN", mountPath, `populate=${populate} sequence=${sequence}`);
+            const newArgs = args.slice();
+            newArgs[2] = function (error?: unknown): unknown {
+              const errorText = error == null ? "" : (error instanceof Error ? `${error.name}: ${error.message}` : (() => {
+                try { return JSON.stringify(error); } catch { return String(error); }
+              })());
+              emitTrace(error == null ? "IDBFS_SYNC_DONE" : "IDBFS_SYNC_ERROR", mountPath,
+                `populate=${populate} sequence=${sequence}${errorText ? ` error=${errorText}` : ""}`);
+              return (callback as (error?: unknown) => unknown)(error);
+            };
+            return oldMountSync.apply(type, newArgs);
+          };
+        }
+      };
+
+      const oldSyncfs = asTraceFn(traceFs.syncfs);
+      if (oldSyncfs) {
+        traceFs.syncfs = function (...args: unknown[]): unknown {
+          installMountSyncHooks();
+          return oldSyncfs.apply(FS, args);
+        };
+      }
+
+      const oldOpen = asTraceFn(traceFs.open);
+      if (oldOpen) {
         traceFs.open = function (...args: unknown[]): unknown {
-          const path = typeof args[0] === "string" ? args[0] : String(args[0] ?? "");
+          const rawPath = typeof args[0] === "string" ? args[0] : String(args[0] ?? "");
+          const path = normalizeTracePath(rawPath);
           const flags = args[1];
           const writable = typeof flags === "string"
             ? /[wa+]/u.test(flags)
@@ -667,10 +723,15 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
           try {
             stream = oldOpen.apply(FS, args);
           } catch (error) {
-            if (isSavePath(path)) emitTrace("OPEN_ERROR", path, `flags=${String(flags)} error=${String(error)}`);
+            if (isSaveFile(path)) {
+              const errorText = error instanceof Error ? `${error.name}: ${error.message}` : (() => {
+                try { return JSON.stringify(error); } catch { return String(error); }
+              })();
+              emitTrace("OPEN_ERROR", path, `flags=${String(flags)} error=${errorText}`);
+            }
             throw error;
           }
-          if (isSavePath(path)) {
+          if (isSaveFile(path)) {
             emitTrace(writable ? "OPEN_WRITE" : "OPEN_READ", path, `flags=${String(flags)}`);
             if (stream && typeof stream === "object" && writable) {
               streamTrace.set(stream as object, { path, writes: 0, bytes: 0, flags: String(flags) });
@@ -680,8 +741,8 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
         };
       }
 
-      const oldWrite = traceFs.write;
-      if (typeof oldWrite === "function") {
+      const oldWrite = asTraceFn(traceFs.write);
+      if (oldWrite) {
         traceFs.write = function (...args: unknown[]): unknown {
           const stream = args[0];
           if (stream && typeof stream === "object") {
@@ -696,8 +757,8 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
         };
       }
 
-      const oldClose = traceFs.close;
-      if (typeof oldClose === "function") {
+      const oldClose = asTraceFn(traceFs.close);
+      if (oldClose) {
         traceFs.close = function (...args: unknown[]): unknown {
           const stream = args[0];
           const details = stream && typeof stream === "object" ? streamTrace.get(stream as object) : undefined;
@@ -705,72 +766,56 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
           if (details) {
             let size = "unknown";
             try {
-              const statFn = traceFs.stat;
-              if (typeof statFn === "function") {
+              const statFn = asTraceFn(traceFs.stat);
+              if (statFn) {
                 const stat = statFn.call(FS, details.path) as { size?: unknown };
                 size = String(stat?.size ?? "unknown");
               }
             } catch { size = "missing-after-close"; }
-            emitTrace("CLOSE_WRITE", details.path, `flags=${details.flags} writes=${details.writes} bytes=${details.bytes} finalSize=${size}`);
+            emitTrace("CLOSE_WRITE", details.path,
+              `flags=${details.flags} writes=${details.writes} bytes=${details.bytes} finalSize=${size}`);
           }
           return result;
         };
       }
 
-      const oldWriteFile = traceFs.writeFile;
-      if (typeof oldWriteFile === "function") {
+      const oldWriteFile = asTraceFn(traceFs.writeFile);
+      if (oldWriteFile) {
         traceFs.writeFile = function (...args: unknown[]): unknown {
-          const path = typeof args[0] === "string" ? args[0] : String(args[0] ?? "");
+          const path = typeof args[0] === "string" ? normalizeTracePath(args[0]) : String(args[0] ?? "");
           const content = args[1] as { byteLength?: number; length?: number } | string | undefined;
           const byteCount = typeof content === "string" ? content.length
             : content && typeof content === "object" ? Number(content.byteLength ?? content.length ?? 0) : 0;
           const result = oldWriteFile.apply(FS, args);
-          if (isSavePath(path)) emitTrace("WRITE_FILE", path, `bytes=${byteCount}`);
+          if (isSaveFile(path)) emitTrace("WRITE_FILE", path, `bytes=${byteCount}`);
           return result;
         };
       }
 
-      const oldRename = traceFs.rename;
-      if (typeof oldRename === "function") {
+      const oldRename = asTraceFn(traceFs.rename);
+      if (oldRename) {
         traceFs.rename = function (...args: unknown[]): unknown {
-          const from = String(args[0] ?? "");
-          const to = String(args[1] ?? "");
+          const from = normalizeTracePath(args[0]);
+          const to = normalizeTracePath(args[1]);
           const result = oldRename.apply(FS, args);
-          if (isSavePath(from) || isSavePath(to)) emitTrace("RENAME", `${from} -> ${to}`);
+          if (isSaveFile(from) || isSaveFile(to)) emitTrace("RENAME", `${from} -> ${to}`);
           return result;
         };
       }
 
-      const oldUnlink = traceFs.unlink;
-      if (typeof oldUnlink === "function") {
+      const oldUnlink = asTraceFn(traceFs.unlink);
+      if (oldUnlink) {
         traceFs.unlink = function (...args: unknown[]): unknown {
-          const path = String(args[0] ?? "");
+          const path = normalizeTracePath(args[0]);
           const result = oldUnlink.apply(FS, args);
-          if (isSavePath(path)) emitTrace("UNLINK", path);
+          if (isSaveFile(path)) emitTrace("UNLINK", path);
           return result;
         };
       }
 
-      const oldSyncfs = traceFs.syncfs;
-      if (typeof oldSyncfs === "function") {
-        traceFs.syncfs = function (...args: unknown[]): unknown {
-          const populate = args[0] === true;
-          const callback = args[1];
-          if (!populate && typeof callback === "function" && syncTraceCount < 8) {
-            syncTraceCount += 1;
-            emitTrace("IDBFS_SYNC_BEGIN", "/data0/*-Save", `populate=false sequence=${syncTraceCount}`);
-            const wrappedCallback = function (error?: unknown) {
-              emitTrace(error ? "IDBFS_SYNC_ERROR" : "IDBFS_SYNC_DONE", "/data0/*-Save", error ? String(error) : `sequence=${syncTraceCount}`);
-              return (callback as (error?: unknown) => unknown)(error);
-            };
-            return oldSyncfs.apply(FS, [args[0], wrappedCallback, ...args.slice(2)]);
-          }
-          return oldSyncfs.apply(FS, args);
-        };
-      }
-
-      emitTrace("INSTALLED", "BrowserWoditor FS hooks", "save-path trace only; no file contents exported");
+      emitTrace("INSTALLED", "BrowserWoditor FS hooks", "v2: only save files; sync logs identify each mounted filesystem");
     }
+
     const originalOpen = FS.open;
     const originalStat = FS.stat;
     const originalLstat = FS.lstat;
