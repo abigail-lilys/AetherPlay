@@ -424,6 +424,10 @@ function installAssetLoader(assets: WolfAsset[]) {
 
   // Android external saves are authoritative when an SAF root is registered.
   const checkedExternalSavePaths = new Set<string>();
+  // A 404 is a deletion signal, not permission to restore an IDBFS copy.
+  const externallyDeletedSaveSlots = new Set<string>();
+  const externalSaveDeletedAt = new Map<string, number>();
+  const EXTERNAL_SAVE_DELETE_STARTUP_GUARD_MS = 30_000;
   let writingExternalSaveIntoVirtualFs = false;
   let suppressExternalSaveReconcile = false;
 
@@ -501,6 +505,15 @@ function installAssetLoader(assets: WolfAsset[]) {
     if (writingExternalSaveIntoVirtualFs || !externalSaveRootRegistered || !config?.gameId) return false;
     const relativePath = externalSaveRelativePath(pathInput);
     if (!relativePath) return false;
+    const deletedSlotKey = relativePath.split("/").pop()?.toLowerCase();
+    if (deletedSlotKey && externallyDeletedSaveSlots.has(deletedSlotKey)) {
+      // Also catch a stale IDBFS copy that appears AFTER the first 404 check.
+      const removed = removeCachedExternalSave(relativePath);
+      const deletedAt = externalSaveDeletedAt.get(deletedSlotKey) ?? Date.now();
+      reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", relativePath,
+        `ageMs=${Date.now() - deletedAt} removedCachedCopies=${removed} source=directory-reconcile`);
+      return false;
+    }
     const virtualPath = `/${normalizeWolfPath(String(pathInput))}`;
     const checkKey = virtualPath.toLowerCase();
     if (checkedExternalSavePaths.has(checkKey)) return false;
@@ -512,8 +525,13 @@ function installAssetLoader(assets: WolfAsset[]) {
       request.overrideMimeType("text/plain; charset=x-user-defined");
       request.send(null);
       if (request.status === 404) {
-        // A definite SAF 404 means the external user deleted this slot. Remove every
-        // virtual mirror so startup cache scans cannot resurrect it.
+        // Record the deletion BEFORE removing files: IDBFS may materialize a cached
+        // mirror asynchronously after this first cleanup has found zero copies.
+        const deletedSlotKey = relativePath.split("/").pop()?.toLowerCase();
+        if (deletedSlotKey) {
+          externallyDeletedSaveSlots.add(deletedSlotKey);
+          externalSaveDeletedAt.set(deletedSlotKey, Date.now());
+        }
         const removed = removeCachedExternalSave(relativePath);
         markExternalSaveCopiesChecked(relativePath);
         checkedExternalSavePaths.add(checkKey);
@@ -615,6 +633,25 @@ function installAssetLoader(assets: WolfAsset[]) {
       if (writingExternalSaveIntoVirtualFs || !externalSaveRootRegistered) return;
       const slotKey = saveSlotKey(pathInput);
       if (!slotKey) return;
+      if (externallyDeletedSaveSlots.has(slotKey)) {
+        const deletedAt = externalSaveDeletedAt.get(slotKey) ?? Date.now();
+        const ageMs = Date.now() - deletedAt;
+        if (ageMs < EXTERNAL_SAVE_DELETE_STARTUP_GUARD_MS) {
+          // Treat early FS.write/File operations as startup/cache replay. Unlink
+          // both mirrors after the operation so the save list cannot show them.
+          const relativePath = externalSaveRelativePath(pathInput);
+          const removed = relativePath ? removeCachedExternalSave(relativePath) : 0;
+          reportWriteback("EXTERNAL_SAVE_DELETE_GUARD", String(pathInput),
+            `slot=${slotKey} ageMs=${ageMs} source=${source} removedCachedCopies=${removed}`);
+          return;
+        }
+        // After the startup window, a new write is treated as deliberate creation
+        // of a replacement save by gameplay, and can be persisted normally.
+        externallyDeletedSaveSlots.delete(slotKey);
+        externalSaveDeletedAt.delete(slotKey);
+        reportWriteback("EXTERNAL_SAVE_DELETE_GUARD_RELEASED", String(pathInput),
+          `slot=${slotKey} ageMs=${ageMs} source=${source}; treating as a new save`);
+      }
       const normalized = normalizeMount(pathInput);
       const path = (normalized.startsWith("/") ? normalized : `/${normalized}`).toLowerCase();
       dirtySavePaths.add(path);
@@ -689,6 +726,18 @@ function installAssetLoader(assets: WolfAsset[]) {
         name: string; bytes: Uint8Array; rank: number; path: string; mtime: number;
       }>();
       try {
+        // A slot can have been marked dirty just before a deletion was observed.
+        // Clear that old write intent so later sync callbacks cannot resurrect it.
+        for (const slotKey of [...dirtySaveGeneration.keys()]) {
+          if (!externallyDeletedSaveSlots.has(slotKey)) continue;
+          for (const path of [...dirtySavePaths]) {
+            if (saveSlotKey(path) === slotKey) dirtySavePaths.delete(path);
+          }
+          dirtySaveGeneration.delete(slotKey);
+          pendingWritebacks.delete(slotKey);
+          reportWriteback("EXTERNAL_SAVE_DELETE_DIRTY_CLEARED", slotKey,
+            "discarded stale cached write intent after external 404");
+        }
         if (!fs.analyzePath("/data0").exists) {
           reportWriteback("SCAN_NO_DATA0", "/data0", "virtual /data0 directory does not exist");
           return;
@@ -707,6 +756,8 @@ function installAssetLoader(assets: WolfAsset[]) {
               const normalized = normalizeMount(path);
               const normalizedPath = (normalized.startsWith("/") ? normalized : `/${normalized}`).toLowerCase();
               const slotKey = name.toLowerCase();
+              // A tombstoned slot is never a publish candidate during the deletion guard.
+              if (externallyDeletedSaveSlots.has(slotKey)) continue;
               // Critical safety rule: cached/IDBFS-restored files are not write intent.
               // Publish only a file which the game actually wrote this session.
               if (!dirtySavePaths.has(normalizedPath) || !dirtySaveGeneration.has(slotKey)) continue;
