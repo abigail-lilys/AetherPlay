@@ -686,7 +686,7 @@ public class AndroidFolderPickerPlugin extends Plugin {
             if (cursor != null) {
                 while (cursor.moveToNext()) {
                     String name = cursor.getString(1);
-                    if (wantedName.equals(name)) {
+                    if (name != null && wantedName.equalsIgnoreCase(name)) {
                         return DocumentsContract.buildDocumentUriUsingTree(treeUri, cursor.getString(0));
                     }
                 }
