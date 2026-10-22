@@ -586,12 +586,23 @@ public class AndroidFolderPickerPlugin extends Plugin {
             if (output == null) throw new IllegalStateException("Could not open destination file");
             output.write(contentBytes);
             output.flush();
+        } catch (Exception error) {
+            call.reject("Could not save diagnostics TXT: " + error.getMessage(), error);
+            return;
+        }
+        try {
+            long actualSize = getDocumentSize(uri);
+            if (actualSize != contentBytes.length) {
+                throw new IllegalStateException("Diagnostic TXT verification failed: expected "
+                    + contentBytes.length + " bytes, received " + actualSize);
+            }
             JSObject response = new JSObject();
             response.put("uri", uri.toString());
             response.put("bytesWritten", contentBytes.length);
+            response.put("verifiedBytes", actualSize);
             call.resolve(response);
         } catch (Exception error) {
-            call.reject("Could not save diagnostics TXT: " + error.getMessage(), error);
+            call.reject("Could not verify saved diagnostics TXT: " + error.getMessage(), error);
         }
     }
 
