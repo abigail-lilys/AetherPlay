@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { exportDiagnosticsTxt, diagnosticErrorText, flushRuntimeLog, installDiagnosticErrorHandlers, logDiagnostic, setRuntimeLogTarget } from "@/src/lib/diagnostics";
-import { getAndroidFolderHandle, getWolfSaveBlobs, putWolfSaveBlob } from "@/src/lib/storage"; // AETHER_WOLF_SAVE_PERSISTENCE_V1
+import { getAndroidFolderHandle } from "@/src/lib/storage";
+import { registerAndroidGameSaveRoot, writeAndroidGameSave } from "@/src/lib/androidFolderPicker";
 import { clearZipArchiveCache } from "@/src/lib/playerCache";
 import {
   createWolfAssetObjectUrls,
@@ -16,13 +17,16 @@ import { useTextLog } from "@/src/hooks/useTextLog";
 const textLogLimit = 100;
 const serviceTitle = "Local Web Game Player";
 
-// WOLF loose games in this project write their active slot under *-Save/Save/.
-// Keep the stored source record untouched; this helper changes only its runtime restore destination.
-function wolfSaveRestoreTargetPath(path: string): string {
-  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  const match = normalized.match(/^(.*-Save)\/(SaveData\d+\.sav)$/iu);
-  return match ? `${match[1]}/Save/${match[2]}` : normalized;
+function wolfSaveArrayBufferToBase64(value: ArrayBuffer): string {
+  const bytes = new Uint8Array(value);
+  const chunkSize = 0x6000;
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    chunks.push(btoa(String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)))));
+  }
+  return chunks.join("");
 }
+
 
 export function usePlayerController() {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
@@ -30,12 +34,12 @@ export function usePlayerController() {
     gameId: string;
     available: boolean;
   } | null>(null);
+  const wolfSaveWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const wolfAssetsRef = useRef<{
     key: string;
     promise: Promise<WolfAssetObjectUrlSet>;
   } | undefined>(undefined);
 
-  const wolfSavePersistenceSuppressedRef = useRef<string | undefined>(undefined);
   const library = useGameLibrary(() => setRuntimeError(null));
   const player = usePlayerFrame(library.activeGame?.id);
   const textLog = useTextLog(textLogLimit);
@@ -95,74 +99,30 @@ export function usePlayerController() {
     });
     try {
       const value = await wolfAssetsForActiveGame();
-      // AETHER_WOLF_SAVE_PERSISTENCE_V1: restore user saves on every runtime launch.
-      let savedFiles: Array<{ path: string; data: ArrayBuffer }> = [];
-      try {
-        const persistedSaves = await getWolfSaveBlobs(game.id);
-        const skipRestoreKey = `aetherplay-debug-skip-wolf-save-restore-once:${game.id}`;
-        const restoreModeKey = `aetherplay-debug-wolf-save-restore-mode-once:${game.id}`;
-        let skipRestoreOnce = false;
-        let restoreMode: "none" | "all" | "nested" | "root" | "root-to-nested" = "none"; // AETHER_WOLF_NO_AUTO_RESTORE_V1
+      if (Capacitor.getPlatform() === "android") {
         try {
-          skipRestoreOnce = window.localStorage.getItem(skipRestoreKey) === "1";
-          if (skipRestoreOnce) window.localStorage.removeItem(skipRestoreKey);
-          const requestedMode = window.localStorage.getItem(restoreModeKey);
-          if (requestedMode === "all" || requestedMode === "nested" || requestedMode === "root" || requestedMode === "root-to-nested") {
-            restoreMode = requestedMode;
-            window.localStorage.removeItem(restoreModeKey);
+          const folder = await getAndroidFolderHandle(game.id);
+          if (folder?.treeUri) {
+            await registerAndroidGameSaveRoot(game.id, folder.treeUri);
+            logDiagnostic("info", "wolf.save.external-root.registered", { gameId: game.id, folderName: folder.folderName });
+          } else {
+            logDiagnostic("warn", "wolf.save.external-root.unavailable", { gameId: game.id, reason: "No Android SAF folder permission is associated with this game." });
           }
-        } catch {
-          // Diagnostic flags are optional; never prevent game startup.
+        } catch (cause) {
+          // The game must still start if external save storage cannot be registered.
+          logDiagnostic("error", "wolf.save.external-root.registration-failed", { gameId: game.id, error: diagnosticErrorText(cause) });
         }
-        const selectedSaves = restoreMode === "none"
-          ? []
-          : restoreMode === "nested"
-            ? persistedSaves.filter((save) => /-Save\/Save\/SaveData\d+\.sav$/iu.test(save.path))
-            : restoreMode === "root" || restoreMode === "root-to-nested"
-              ? persistedSaves.filter((save) => /-Save\/SaveData\d+\.sav$/iu.test(save.path))
-              : persistedSaves;
-        // Isolated restore tests must not replace stored blobs with test-session writes.
-        if (skipRestoreOnce || (restoreMode !== "none" && restoreMode !== "all")) {
-          wolfSavePersistenceSuppressedRef.current = game.id;
-        } else if (wolfSavePersistenceSuppressedRef.current === game.id) {
-          // The previous test's write suppression lasts for one runtime session only.
-          wolfSavePersistenceSuppressedRef.current = undefined;
-          logDiagnostic("info", "wolf.save.persist.test-suppression-cleared", { gameId: game.id });
-        }
-        logDiagnostic(skipRestoreOnce || (restoreMode !== "none" && restoreMode !== "all") ? "warn" : "info", "wolf.save.restore.records-loaded", {
-          gameId: game.id,
-          storedCount: persistedSaves.length,
-          restoreSkippedOnce: skipRestoreOnce,
-          restoreMode,
-          selectedCount: skipRestoreOnce ? 0 : selectedSaves.length,
-          saves: persistedSaves.map(({ path, size }) => ({ path, size })),
-          selectedSavePaths: skipRestoreOnce ? [] : selectedSaves.map(({ path, size }) => ({
-            path, size, targetPath: restoreMode === "root-to-nested" ? wolfSaveRestoreTargetPath(path) : path,
-          })),
-        });
-        if (!skipRestoreOnce) {
-          savedFiles = await Promise.all(selectedSaves.map(async (save) => ({
-            path: restoreMode === "root-to-nested" ? wolfSaveRestoreTargetPath(save.path) : save.path,
-            data: await save.blob.arrayBuffer(),
-          })));
-        }
-      } catch (cause) {
-        // Save storage failure must not prevent the original game from starting.
-        logDiagnostic("error", "wolf.save.restore.read-failed", { gameId: game.id, error: diagnosticErrorText(cause) });
       }
       logDiagnostic("info", "wolf-assets.response.ready", {
         gameId: game.id, requestId: message.requestId, assetCount: value.assets.length,
         bytesInUrls: value.assets.reduce((sum, asset) => sum + asset.size, 0),
-        savedFileCount: savedFiles.length,
-        savedFilePaths: savedFiles.map((file) => file.path),
         elapsedMs: Date.now() - requestStartedAt,
       });
       (event.source as Window).postMessage(
         {
-        type: "wolf-assets-response",
+          type: "wolf-assets-response",
           requestId: message.requestId,
           assets: value.assets,
-          savedFiles,
         },
         window.location.origin,
       );
@@ -194,10 +154,6 @@ export function usePlayerController() {
 
   useEffect(() => {
     return () => clearZipArchiveCache();
-  }, [library.activeGame?.id]);
-
-  useEffect(() => {
-    if (!library.activeGame) wolfSavePersistenceSuppressedRef.current = undefined;
   }, [library.activeGame?.id]);
 
   useEffect(() => {
@@ -261,34 +217,38 @@ export function usePlayerController() {
       }
 
       const message = event.data;
-      // AETHER_WOLF_SAVE_TRACE_DIAGNOSTICS_V1: include runtime FS traces in exported diagnostics.
-      if (message.type === "wolf-save-trace") {
-        const activeGame = library.activeGame;
-        if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
-        logDiagnostic("info", "wolf.save.trace", {
-          gameId: message.gameId, event: message.event, path: message.path,
-          details: message.details, traceLine: message.line, at: message.at,
-        });
-        return;
-      }
-      // AETHER_WOLF_SAVE_PERSISTENCE_V1: store WOLF saves outside the volatile WASM FS.
       if (message.type === "wolf-save-written") {
         const activeGame = library.activeGame;
         if (!activeGame || message.gameId !== activeGame.id || event.source !== player.frameRef.current?.contentWindow) return;
-        if (wolfSavePersistenceSuppressedRef.current === message.gameId) {
-          logDiagnostic("warn", "wolf.save.persist.suppressed-for-test", {
-            gameId: message.gameId, path: message.path, bytes: message.data?.byteLength,
+        if (!(message.data instanceof ArrayBuffer) || message.data.byteLength === 0 || message.data.byteLength > 16 * 1024 * 1024) {
+          logDiagnostic("warn", "wolf.save.external-write.rejected", { gameId: message.gameId, path: message.path, bytes: message.data?.byteLength });
+          return;
+        }
+        if (!/^Save\/SaveData\d+\.sav$/iu.test(message.path)) {
+          logDiagnostic("warn", "wolf.save.external-write.invalid-path", { gameId: message.gameId, path: message.path });
+          return;
+        }
+        const task = wolfSaveWriteQueueRef.current.catch(() => undefined).then(async () => {
+          const folder = await getAndroidFolderHandle(message.gameId);
+          if (!folder?.treeUri) throw new Error("没有可写入的 Android 游戏目录授权。");
+          const result = await writeAndroidGameSave(
+            folder.treeUri,
+            message.path,
+            wolfSaveArrayBufferToBase64(message.data),
+          );
+          if (result.bytesWritten !== message.data.byteLength) {
+            throw new Error(`外部存档校验失败：期望 ${message.data.byteLength} 字节，实际 ${result.bytesWritten} 字节。`);
+          }
+          logDiagnostic("info", "wolf.save.external-write.completed", {
+            gameId: message.gameId, path: result.relativePath,
+            bytes: result.bytesWritten, sha256: result.sha256, folderName: folder.folderName,
           });
-          return;
-        }
-        if (!(message.data instanceof ArrayBuffer) || message.data.byteLength > 16 * 1024 * 1024) {
-          logDiagnostic("warn", "wolf.save.persist.rejected", { gameId: message.gameId, path: message.path, bytes: message.data?.byteLength });
-          return;
-        }
-        void putWolfSaveBlob(message.gameId, message.path, new Blob([message.data], { type: "application/octet-stream" })).then(
-          () => logDiagnostic("info", "wolf.save.persisted", { gameId: message.gameId, path: message.path, bytes: message.data.byteLength }),
-          (cause) => logDiagnostic("error", "wolf.save.persist.failed", { gameId: message.gameId, path: message.path, error: diagnosticErrorText(cause) }),
-        );
+        }).catch((cause) => {
+          logDiagnostic("error", "wolf.save.external-write.failed", {
+            gameId: message.gameId, path: message.path, error: diagnosticErrorText(cause),
+          });
+        });
+        wolfSaveWriteQueueRef.current = task;
         return;
       }
       if (message.type === "export-diagnostics") {

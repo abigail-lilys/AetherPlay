@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { Capacitor } from "@capacitor/core";
-import { saveAndroidBinaryFile, pickAndroidBinaryFile } from "@/src/lib/androidFolderPicker";
-import { putWolfSaveBlob } from "@/src/lib/storage"; // AETHER_WOLF_SAVE_PERSISTENCE_V1
 
-type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "export-file" | "import-file";
+type DebugCommand = "probe" | "list-files" | "read-file" | "write-file";
 type DebugTab = "overview" | "files" | "memory";
 type DebugFormat = "text" | "hex";
 
@@ -46,19 +43,12 @@ interface DebugResponse {
   entries?: DebugEntry[];
   truncated?: boolean;
   file?: DebugFile;
-  // AETHER_WOLF_BINARY_EXPORT
-  exportedFile?: { path: string; size: number; data: string };
-  // AETHER_WOLF_BINARY_IMPORT
-  importedFile?: { path: string; size: number };
   backupPath?: string;
 }
 interface DebugRequestArgs {
   path?: string;
   format?: DebugFormat;
   content?: string;
-  // AETHER_WOLF_BINARY_IMPORT
-  filename?: string;
-  data?: string;
 }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
@@ -96,14 +86,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
-
-// AETHER_WOLF_SAVE_PERSISTENCE_V1: retain imported binary bytes outside the runtime.
-function blobFromBase64(value: string): Blob {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return new Blob([bytes], { type: "application/octet-stream" });
-}
 function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   parts.pop();
@@ -131,7 +113,7 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "export-file" || command === "import-file" ? 60000 : 8000);
+      }, 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -207,77 +189,6 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
       if (!response.file) throw new Error("运行时没有返回文件内容。");
       setSelectedFile(response.file);
       setEditorContent(response.file.content);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  // AETHER_WOLF_BINARY_EXPORT
-  const exportFile = async (entry: DebugEntry) => {
-    setBusy(`正在导出 ${entry.name}…`);
-    setError("");
-    setNotice("");
-    try {
-      const response = await request("export-file", { path: entry.path });
-      const file = response.exportedFile;
-      if (!file) throw new Error("运行时没有返回原始文件数据。");
-
-      if (Capacitor.getPlatform() === "android") {
-        await saveAndroidBinaryFile(entry.name, file.data);
-      } else {
-        const binary = atob(file.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-        const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = entry.name;
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
-      setNotice(`已导出 ${entry.name}（${formatBytes(file.size)}）。请选择系统保存位置。`);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  // AETHER_WOLF_BINARY_IMPORT
-  const importFile = async () => {
-    setBusy("请选择要导入的存档…");
-    setError("");
-    setNotice("");
-    try {
-      if (Capacitor.getPlatform() !== "android") throw new Error("存档导入目前仅在 Android APK 中启用。");
-      const picked = await pickAndroidBinaryFile();
-      const rawName = (picked.filename || "imported-save.sav").replace(/\\/g, "/").split("/").pop()?.trim();
-      const filename = rawName || "imported-save.sav";
-      if (picked.size > 16 * 1024 * 1024 || picked.data.length > 22_369_624) throw new Error("存档超过 16 MiB 导入上限。");
-      const directory = currentPath === "/" ? "" : currentPath.replace(new RegExp("/+$"), "");
-      const targetPath = `${directory}/${filename}`;
-      const existing = entries.find((entry) => entry.kind === "file" && entry.name === filename);
-      if (existing && !window.confirm(`当前目录已存在同名文件：
-${targetPath}
-
-继续导入会先备份旧文件，再替换它。继续吗？`)) {
-        setNotice("已取消导入；现有存档未更改。");
-        return;
-      }
-      setBusy(`正在导入 ${filename}…`);
-      const response = await request("import-file", { path: targetPath, filename, data: picked.data });
-      // AETHER_WOLF_SAVE_PERSISTENCE_V1: import is not successful until durable storage commits.
-      await putWolfSaveBlob(gameId, targetPath, blobFromBase64(picked.data));
-      const listing = await request("list-files", { path: currentPath });
-      setCurrentPath(listing.path || currentPath);
-      setEntries(listing.entries || []);
-      setTruncated(Boolean(listing.truncated));
-      const backupNote = response.backupPath ? `旧文件备份：${response.backupPath}` : "未覆盖旧文件";
-      setNotice(`导入成功：${response.importedFile?.path || targetPath}（${formatBytes(response.importedFile?.size ?? picked.size)}）。${backupNote}。建议回到游戏中重新载入存档。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -366,42 +277,6 @@ ${targetPath}
               void request("probe").then((response) => { setCapabilities(response.capabilities ?? null); setNotice("运行时能力已刷新。"); })
                 .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
             }}>重新探测</button>
-            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
-              try {
-                window.localStorage.setItem(`aetherplay-debug-skip-wolf-save-restore-once:${gameId}`, "1");
-                setError("");
-                setNotice("已设置：下次重新进入此游戏时跳过恢复持久化存档，仅用于诊断；不会删除已导入的存档，也会暂停本次测试会话的存档回写。请关闭调试台，返回游戏库后重新进入游戏。");
-              } catch (cause) {
-                setError(cause instanceof Error ? cause.message : String(cause));
-              }
-            }}>诊断：下次启动跳过存档恢复（不删除存档）</button>
-            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
-              try {
-                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "nested");
-                setError("");
-                setNotice("已设置：下次启动只恢复路径为 *-Save/Save/SaveData*.sav 的记录；其他存档仍保留但本次不恢复。测试会暂停本次会话的存档回写。请返回游戏库后重新进入游戏。");
-              } catch (cause) {
-                setError(cause instanceof Error ? cause.message : String(cause));
-              }
-            }}>诊断：下次只恢复内层 Save/SaveData*.sav</button>
-            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
-              try {
-                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "root");
-                setError("");
-                setNotice("已设置：下次启动只恢复路径为 *-Save/SaveData*.sav 的外层记录；其他存档仍保留但本次不恢复。测试会暂停本次会话的存档回写。请返回游戏库后重新进入游戏。");
-              } catch (cause) {
-                setError(cause instanceof Error ? cause.message : String(cause));
-              }
-            }}>诊断：下次只恢复外层 *-Save/SaveData*.sav（原路径）</button>
-            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%", borderColor: "#b8844a" }} onClick={() => {
-              try {
-                window.localStorage.setItem(`aetherplay-debug-wolf-save-restore-mode-once:${gameId}`, "root-to-nested");
-                setError("");
-                setNotice("已设置：下次只读取外层 *-Save/SaveData*.sav 的字节，但把它放到游戏实际写入的内层 *-Save/Save/SaveData*.sav 路径。原存档记录不会被删除，本次测试会暂停运行时回写。请返回游戏库后重新进入。 ");
-              } catch (cause) {
-                setError(cause instanceof Error ? cause.message : String(cause));
-              }
-            }}>诊断：把外层存档内容恢复到内层 Save/ 目录</button>
           </section>
         ) : null}
 
@@ -431,30 +306,15 @@ ${targetPath}
               <div style={{ flex: 1, minWidth: 0, color: "#9eacc1", fontSize: 12, overflowWrap: "anywhere" }}>路径：{currentPath}</div>
               <button type="button" style={buttonStyle} disabled={Boolean(busy)} onClick={() => void loadDirectory(currentPath)}>刷新</button>
             </div>
-            {Capacitor.getPlatform() === "android" ? (
-              <button type="button" disabled={Boolean(busy)} onClick={() => void importFile()}
-                style={{ ...buttonStyle, width: "100%", background: "#244c3b", borderColor: "#397c66" }}>
-                导入存档到当前目录
-              </button>
-            ) : null}
-            <div style={subtleStyle}>导入文件将写入当前虚拟目录；同名文件会先备份到 /.aetherplay-debug-backups 再替换。</div>
             <div style={{ border: "1px solid #253247", borderRadius: 12, overflow: "hidden" }}>
               {entries.length === 0 && !busy ? <div style={{ padding: 14, ...subtleStyle }}>目录为空、文件系统尚未就绪，或运行时不支持目录读取。</div> : null}
               {entries.map((entry) => (
-                <div key={entry.path} style={{ display: "flex", alignItems: "stretch", gap: 6, borderBottom: "1px solid #202b3a", background: "#0f1722" }}>
-                  <button type="button" onClick={() => entry.kind === "directory" ? setCurrentPath(entry.path) : void openFile(entry)}
-                    style={{ display: "flex", flex: 1, minWidth: 0, alignItems: "center", gap: 10, padding: "12px 11px", border: 0, textAlign: "left", background: selectedFile?.path === entry.path ? "#1d3049" : "#0f1722", color: "#edf3fc" }}>
-                    <span style={{ fontSize: 18, width: 22, textAlign: "center" }}>{entry.kind === "directory" ? "📁" : "▤"}</span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflowWrap: "anywhere" }}>{entry.name}</span>
-                    <span style={{ ...subtleStyle, flexShrink: 0 }}>{entry.kind === "directory" ? "目录" : formatBytes(entry.size)}</span>
-                  </button>
-                  {entry.kind === "file" ? (
-                    <button type="button" disabled={Boolean(busy)} onClick={() => void exportFile(entry)}
-                      style={{ ...buttonStyle, alignSelf: "center", flexShrink: 0, marginRight: 8, padding: "8px 10px" }}>
-                      导出
-                    </button>
-                  ) : null}
-                </div>
+                <button key={entry.path} type="button" onClick={() => entry.kind === "directory" ? setCurrentPath(entry.path) : void openFile(entry)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "12px 11px", border: 0, borderBottom: "1px solid #202b3a", textAlign: "left", background: selectedFile?.path === entry.path ? "#1d3049" : "#0f1722", color: "#edf3fc" }}>
+                  <span style={{ fontSize: 18, width: 22, textAlign: "center" }}>{entry.kind === "directory" ? "📁" : "▤"}</span>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflowWrap: "anywhere" }}>{entry.name}</span>
+                  <span style={{ ...subtleStyle, flexShrink: 0 }}>{entry.kind === "directory" ? "目录" : formatBytes(entry.size)}</span>
+                </button>
               ))}
             </div>
             {truncated ? <div style={subtleStyle}>目录项目较多，仅显示前 250 项。</div> : null}

@@ -71,6 +71,61 @@ public class AndroidFolderPickerPlugin extends Plugin {
         return normalized.length() == 0 ? null : normalized.toString();
     }
 
+    private static final class GameSaveRoot {
+        final String gameId;
+        final Uri treeUri;
+        GameSaveRoot(String gameId, Uri treeUri) {
+            this.gameId = gameId;
+            this.treeUri = treeUri;
+        }
+    }
+    private static volatile GameSaveRoot activeGameSaveRoot = new GameSaveRoot("", Uri.EMPTY);
+    private static final java.util.concurrent.ExecutorService SAVE_IO_EXECUTOR =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final int MAX_GAME_SAVE_BYTES = 16 * 1024 * 1024;
+
+    static Uri findRegisteredGameSaveUri(String gameId, String path, ContentResolver resolver) throws Exception {
+        GameSaveRoot root = activeGameSaveRoot;
+        if (gameId == null || !gameId.equals(root.gameId) || root.treeUri == null || Uri.EMPTY.equals(root.treeUri)) return null;
+        String normalized = normalizeSaveRelativePath(path);
+        if (normalized == null) return null;
+        String[] parts = normalized.split("/");
+        String currentId = DocumentsContract.getTreeDocumentId(root.treeUri);
+        for (int depth = 0; depth < parts.length; depth++) {
+            Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(root.treeUri, currentId);
+            String foundId = null;
+            boolean expectDirectory = depth < parts.length - 1;
+            try (Cursor cursor = resolver.query(childrenUri,
+                    new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE}, null, null, null)) {
+                if (cursor == null) return null;
+                while (cursor.moveToNext()) {
+                    String name = cursor.getString(1);
+                    String mime = cursor.getString(2);
+                    if (name == null || !name.equalsIgnoreCase(parts[depth])) continue;
+                    boolean isDirectory = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
+                    if (isDirectory != expectDirectory) continue;
+                    foundId = cursor.getString(0);
+                    break;
+                }
+            }
+            if (foundId == null) return null;
+            currentId = foundId;
+        }
+        return DocumentsContract.buildDocumentUriUsingTree(root.treeUri, currentId);
+    }
+
+    private static String normalizeSaveRelativePath(String path) {
+        if (path == null) return null;
+        String value = path.replace('\\', '/');
+        if (value.startsWith("/")) return null;
+        String[] parts = value.split("/", -1);
+        if (parts.length != 2 || !"Save".equalsIgnoreCase(parts[0])
+                || !parts[1].matches("(?i)SaveData\\d+\\.sav")) return null;
+        return "Save/" + parts[1];
+    }
+
     private static final int MAX_RUNTIME_LOG_BYTES = 512 * 1024;
     @PluginMethod
     public void pickDirectory(PluginCall call) {
@@ -271,6 +326,162 @@ public class AndroidFolderPickerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void registerGameSaveRoot(PluginCall call) {
+        String gameId = call.getString("gameId");
+        String treeValue = call.getString("treeUri");
+        if (gameId == null || gameId.isEmpty() || treeValue == null || treeValue.isEmpty()) {
+            call.reject("Missing game ID or Android folder URI");
+            return;
+        }
+        Uri treeUri = Uri.parse(treeValue);
+        if (!"content".equals(treeUri.getScheme())) {
+            call.reject("Save root must be an Android SAF content URI");
+            return;
+        }
+        activeGameSaveRoot = new GameSaveRoot(gameId, treeUri);
+        JSObject response = new JSObject();
+        response.put("registered", true);
+        call.resolve(response);
+    }
+
+    @PluginMethod
+    public void writeGameSave(PluginCall call) {
+        String treeValue = call.getString("treeUri");
+        String relativePath = normalizeSaveRelativePath(call.getString("relativePath"));
+        String encoded = call.getString("data");
+        if (treeValue == null || treeValue.isEmpty() || relativePath == null || encoded == null || encoded.isEmpty()) {
+            call.reject("Missing save folder, path, or bytes");
+            return;
+        }
+        if (encoded.length() > 22_369_624) {
+            call.reject("WOLF save exceeds the 16 MiB write limit");
+            return;
+        }
+        final Uri treeUri = Uri.parse(treeValue);
+        if (!"content".equals(treeUri.getScheme())) {
+            call.reject("Save destination must be an Android SAF content URI");
+            return;
+        }
+        final byte[] bytes;
+        try {
+            bytes = Base64.decode(encoded, Base64.DEFAULT);
+        } catch (Exception error) {
+            call.reject("Invalid base64 save data", error);
+            return;
+        }
+        if (bytes.length == 0 || bytes.length > MAX_GAME_SAVE_BYTES) {
+            call.reject("WOLF save size is invalid or exceeds 16 MiB");
+            return;
+        }
+        SAVE_IO_EXECUTOR.execute(() -> {
+            try {
+                writeGameSaveToTree(treeUri, relativePath, bytes);
+                JSObject response = new JSObject();
+                response.put("relativePath", relativePath);
+                response.put("bytesWritten", bytes.length);
+                response.put("sha256", sha256Hex(bytes));
+                call.resolve(response);
+            } catch (Exception error) {
+                call.reject("Could not save WOLF data to the Android game folder: " + error.getMessage(), error);
+            }
+        });
+    }
+
+    private void writeGameSaveToTree(Uri treeUri, String relativePath, byte[] bytes) throws Exception {
+        ContentResolver resolver = getContext().getContentResolver();
+        String rootId = DocumentsContract.getTreeDocumentId(treeUri);
+        Uri saveDir = findChildDocument(treeUri, rootId, "Save");
+        if (saveDir == null) {
+            Uri rootDocument = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId);
+            saveDir = DocumentsContract.createDocument(resolver, rootDocument,
+                DocumentsContract.Document.MIME_TYPE_DIR, "Save");
+            if (saveDir == null) saveDir = findChildDocument(treeUri, rootId, "Save");
+        }
+        if (saveDir == null) throw new IllegalStateException("Cannot create Save directory in the selected game folder");
+        try (Cursor cursor = resolver.query(saveDir,
+                new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()
+                    && !DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0))) {
+                throw new IllegalStateException("The selected folder contains a non-directory named Save");
+            }
+        }
+        String parentId = DocumentsContract.getDocumentId(saveDir);
+        String fileName = relativePath.substring(relativePath.indexOf('/') + 1);
+        Uri existing = findChildDocument(treeUri, parentId, fileName);
+        byte[] oldBytes = existing == null ? null : readDocumentBytes(existing);
+
+        String tempName = "." + fileName + ".tmp-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        Uri parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentId);
+        Uri temp = DocumentsContract.createDocument(resolver, parentUri,
+            "application/octet-stream", tempName);
+        if (temp == null) throw new IllegalStateException("Could not create temporary save file");
+        try {
+            writeDocumentBytes(temp, bytes, "wt");
+            byte[] verifyTemp = readDocumentBytes(temp);
+            if (!Arrays.equals(bytes, verifyTemp)) throw new IllegalStateException("Temporary save verification failed");
+
+            if (existing != null) {
+                boolean deleted = false;
+                try { deleted = DocumentsContract.deleteDocument(resolver, existing); } catch (Exception ignored) {}
+                if (!deleted) {
+                    // Some providers disallow rename/delete; preserve and restore old bytes if direct writing fails.
+                    try {
+                        writeDocumentBytes(existing, bytes, "wt");
+                        if (!Arrays.equals(bytes, readDocumentBytes(existing))) throw new IllegalStateException("Save read-back verification failed");
+                        try { DocumentsContract.deleteDocument(resolver, temp); } catch (Exception ignored) {}
+                        return;
+                    } catch (Exception writeError) {
+                        try { writeDocumentBytes(existing, oldBytes, "wt"); } catch (Exception restoreError) {
+                            writeError.addSuppressed(restoreError);
+                        }
+                        throw writeError;
+                    }
+                }
+            }
+
+            Uri renamed = null;
+            try { renamed = DocumentsContract.renameDocument(resolver, temp, fileName); } catch (Exception ignored) {}
+            if (renamed == null) {
+                Uri target = DocumentsContract.createDocument(resolver, parentUri,
+                    "application/octet-stream", fileName);
+                if (target == null) throw new IllegalStateException("Could not create destination save file");
+                try {
+                    writeDocumentBytes(target, bytes, "wt");
+                    if (!Arrays.equals(bytes, readDocumentBytes(target))) throw new IllegalStateException("Save read-back verification failed");
+                    try { DocumentsContract.deleteDocument(resolver, temp); } catch (Exception ignored) {}
+                } catch (Exception writeError) {
+                    try { DocumentsContract.deleteDocument(resolver, target); } catch (Exception ignored) {}
+                    throw writeError;
+                }
+            }
+        } catch (Exception error) {
+            try { DocumentsContract.deleteDocument(resolver, temp); } catch (Exception ignored) {}
+            // If replacement removed the old document and the new target was not created, best-effort restore it.
+            if (oldBytes != null && findChildDocument(treeUri, parentId, fileName) == null) {
+                try {
+                    Uri restored = DocumentsContract.createDocument(resolver, parentUri,
+                        "application/octet-stream", fileName);
+                    if (restored != null) writeDocumentBytes(restored, oldBytes, "wt");
+                } catch (Exception restoreError) {
+                    error.addSuppressed(restoreError);
+                }
+            }
+            throw error;
+        }
+        Uri finalUri = findChildDocument(treeUri, parentId, fileName);
+        if (finalUri == null || !Arrays.equals(bytes, readDocumentBytes(finalUri))) {
+            throw new IllegalStateException("Final external save verification failed");
+        }
+    }
+
+    private static String sha256Hex(byte[] bytes) throws Exception {
+        byte[] hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+        StringBuilder result = new StringBuilder(hash.length * 2);
+        for (byte value : hash) result.append(String.format(java.util.Locale.ROOT, "%02x", value & 0xff));
+        return result.toString();
+    }
+
+    @PluginMethod
     public synchronized void appendRuntimeLog(PluginCall call) {
         String treeValue = call.getString("treeUri");
         String content = call.getString("content");
@@ -366,123 +577,21 @@ public class AndroidFolderPickerPlugin extends Plugin {
         }
         Uri uri = result.getData().getData();
         String content = call.getString("content");
-        if (content == null) content = "";
-        try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wa")) {
+        if (content == null || content.isEmpty()) {
+            call.reject("Diagnostics content is empty; refusing to create a 0-byte file");
+            return;
+        }
+        byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+        try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
             if (output == null) throw new IllegalStateException("Could not open destination file");
-            output.write(content.getBytes(StandardCharsets.UTF_8));
+            output.write(contentBytes);
             output.flush();
             JSObject response = new JSObject();
             response.put("uri", uri.toString());
+            response.put("bytesWritten", contentBytes.length);
             call.resolve(response);
         } catch (Exception error) {
             call.reject("Could not save diagnostics TXT: " + error.getMessage(), error);
-        }
-    }
-
-    // AETHER_WOLF_BINARY_EXPORT
-    @PluginMethod
-    public void exportBinaryFile(PluginCall call) {
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/octet-stream");
-        String filename = call.getString("filename");
-        if (filename == null || filename.trim().isEmpty()) filename = "game-save.sav";
-        intent.putExtra(Intent.EXTRA_TITLE, filename);
-        startActivityForResult(call, intent, "runtimeBinaryFileCreated");
-    }
-
-    @ActivityCallback
-    private void runtimeBinaryFileCreated(PluginCall call, ActivityResult result) {
-        if (call == null) return;
-        if (result == null || result.getResultCode() != Activity.RESULT_OK
-                || result.getData() == null || result.getData().getData() == null) {
-            call.reject("Save export cancelled", "CANCELLED");
-            return;
-        }
-
-        String encoded = call.getString("data");
-        if (encoded == null || encoded.isEmpty()) {
-            call.reject("Missing binary file data");
-            return;
-        }
-        // Bound the native bridge payload to 16 MiB of decoded file data.
-        if (encoded.length() > 22_369_624) {
-            call.reject("File exceeds the 16 MiB export limit");
-            return;
-        }
-
-        Uri uri = result.getData().getData();
-        try {
-            byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
-            if (bytes.length > 16 * 1024 * 1024) {
-                call.reject("File exceeds the 16 MiB export limit");
-                return;
-            }
-            try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
-                if (output == null) throw new IllegalStateException("Could not open destination file");
-                output.write(bytes);
-                output.flush();
-            }
-            JSObject response = new JSObject();
-            response.put("uri", uri.toString());
-            response.put("bytesWritten", bytes.length);
-            call.resolve(response);
-        } catch (Exception error) {
-            call.reject("Could not export save file: " + error.getMessage(), error);
-        }
-    }
-
-    // AETHER_WOLF_BINARY_IMPORT
-    @PluginMethod
-    public void importBinaryFile(PluginCall call) {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivityForResult(call, intent, "runtimeBinaryFileSelected");
-    }
-
-    @ActivityCallback
-    private void runtimeBinaryFileSelected(PluginCall call, ActivityResult result) {
-        if (call == null) return;
-        if (result == null || result.getResultCode() != Activity.RESULT_OK
-                || result.getData() == null || result.getData().getData() == null) {
-            call.reject("Save import cancelled", "CANCELLED");
-            return;
-        }
-
-        Uri uri = result.getData().getData();
-        String filename = "imported-save.sav";
-        try (Cursor cursor = getContext().getContentResolver().query(
-                uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                String name = cursor.getString(0);
-                if (name != null && !name.trim().isEmpty()) filename = name;
-            }
-        } catch (Exception ignored) {
-            // Use the fallback filename if a document provider hides metadata.
-        }
-
-        try (InputStream input = getContext().getContentResolver().openInputStream(uri);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            if (input == null) throw new IllegalStateException("Cannot open selected save file");
-            byte[] buffer = new byte[65536];
-            int count;
-            while ((count = input.read(buffer)) != -1) {
-                if (output.size() + count > 16 * 1024 * 1024) {
-                    call.reject("Save file exceeds the 16 MiB import limit");
-                    return;
-                }
-                output.write(buffer, 0, count);
-            }
-            byte[] bytes = output.toByteArray();
-            JSObject response = new JSObject();
-            response.put("filename", filename);
-            response.put("size", bytes.length);
-            response.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
-            call.resolve(response);
-        } catch (Exception error) {
-            call.reject("Could not read selected save file: " + error.getMessage(), error);
         }
     }
 

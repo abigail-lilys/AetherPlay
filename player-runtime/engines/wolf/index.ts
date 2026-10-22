@@ -11,13 +11,10 @@ type WolfAsset = {
   size: number;
 };
 
-type WolfSavedFile = { path: string; data: ArrayBuffer };
 type WolfAssetResponse = {
   type: "wolf-assets-response";
   requestId: string;
   assets?: WolfAsset[];
-  // AETHER_WOLF_SAVE_PERSISTENCE_V1
-  savedFiles?: WolfSavedFile[];
   error?: string;
 };
 
@@ -51,13 +48,10 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "list-files" | "read-file" | "write-file" | "export-file" | "import-file";
+  command: "probe" | "list-files" | "read-file" | "write-file";
   path?: string;
   format?: "text" | "hex";
   content?: string;
-  // AETHER_WOLF_BINARY_IMPORT
-  filename?: string;
-  data?: string;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -72,10 +66,6 @@ type AetherDebugResponse = {
   entries?: AetherDebugEntry[];
   truncated?: boolean;
   file?: { path: string; size: number; format: "text" | "hex"; content: string };
-  // AETHER_WOLF_BINARY_EXPORT
-  exportedFile?: { path: string; size: number; data: string };
-  // AETHER_WOLF_BINARY_IMPORT
-  importedFile?: { path: string; size: number };
   backupPath?: string;
 };
 type AetherDebugFS = {
@@ -87,7 +77,6 @@ type AetherDebugFS = {
   writeFile(path: string, data: Uint8Array | string): unknown;
 };
 const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
-const AETHER_DEBUG_MAX_EXPORT_BYTES = 16 * 1024 * 1024;
 
 // AetherPlay diagnostic: capture WebAssembly.Memory without relying on
 // Emscripten Module.HEAP* properties.
@@ -268,106 +257,6 @@ function aetherDebugReadFile(pathInput: string): NonNullable<AetherDebugResponse
     return { path, size: bytes.byteLength, format: "hex", content: hex };
   }
 }
-// AETHER_WOLF_BINARY_EXPORT: encode bounded chunks to avoid argument-limit errors.
-function aetherDebugToBase64(bytes: Uint8Array): string {
-  const chunkSize = 0x6000; // divisible by three, so intermediate chunks need no padding
-  const parts: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
-    parts.push(btoa(String.fromCharCode(...chunk)));
-  }
-  return parts.join("");
-}
-
-// AETHER_WOLF_BINARY_IMPORT: decode base64 into exact bytes without text conversion.
-function aetherDebugFromBase64(value: string): Uint8Array {
-  if (typeof value !== "string" || value.length === 0) throw new Error("缺少存档数据。");
-  if (value.length > 22_369_624 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new Error("存档数据无效或超过 16 MiB 导入上限。");
-  }
-  const binary = atob(value);
-  if (binary.length > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("存档超过 16 MiB 导入上限。");
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return bytes;
-}
-function aetherDebugEnsureParents(fs: AetherDebugFS, path: string): void {
-  const parts = path.split("/").filter(Boolean);
-  parts.pop();
-  let current = "";
-  for (const part of parts) {
-    current += `/${part}`;
-    if (!fs.analyzePath(current).exists) fs.mkdir(current);
-  }
-}
-// AETHER_WOLF_SAVE_PERSISTENCE_V1
-function isPersistentWolfSavePath(pathInput: string): boolean {
-  const path = normalizeWolfPath(pathInput).toLowerCase();
-  if (!path || path.startsWith(".aetherplay-debug-backups/")) return false;
-  if (/\.(?:tmp|temp|bak|backup)$/u.test(path)) return false;
-  return /(^|\/)save(?:s|data)?\//u.test(path)
-    || /(?:^|\/)savedata\d*[^/]*$/u.test(path)
-    || /\.(?:sav|save|wolfsave)$/u.test(path);
-}
-
-function persistWolfSaveFromVirtualFs(pathInput: string): void {
-  const gameId = config?.gameId;
-  const path = normalizeWolfPath(pathInput);
-  if (!gameId || !path || !isPersistentWolfSavePath(path)) return;
-  try {
-    const absolute = `/${path}`;
-    const fs = FS as unknown as {
-      analyzePath(path: string): { exists: boolean };
-      stat(path: string): { size: number; mode: number };
-      readFile(path: string): Uint8Array | string;
-    };
-    if (!fs.analyzePath(absolute).exists) return;
-    const info = fs.stat(absolute);
-    if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") return;
-    if (Math.max(0, Number(info.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) {
-      console.warn(`AetherPlay: WOLF save is over the persistence limit: ${path}`);
-      return;
-    }
-    const bytes = aetherDebugToBytes(fs.readFile(absolute));
-    if (bytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) return;
-    const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    window.parent.postMessage({ type: "wolf-save-written", gameId, path, data }, window.location.origin);
-  } catch (cause) {
-    console.warn(`AetherPlay: could not persist WOLF save ${path}`, cause);
-  }
-}
-
-function aetherDebugImportFile(message: AetherDebugCommand): { path: string; size: number; backupPath?: string } {
-  const fs = aetherDebugFs();
-  const path = aetherDebugNormalizePath(message.path || "");
-  if (path === "/" || path.startsWith("/.aetherplay-debug-backups/")) {
-    throw new Error("不能把存档导入根目录或调试备份目录。");
-  }
-  const bytes = aetherDebugFromBase64(message.data || "");
-  let backupPath: string | undefined;
-  if (fs.analyzePath(path).exists) {
-    const oldInfo = fs.stat(path);
-    if (aetherDebugModeKind(Number(oldInfo.mode) || 0) === "directory") throw new Error("目标路径是目录，请选择存档文件名。");
-    if (Math.max(0, Number(oldInfo.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("现有文件超过 16 MiB，拒绝覆盖以避免无法备份。");
-    const oldBytes = aetherDebugToBytes(fs.readFile(path));
-    if (oldBytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("现有文件超过 16 MiB，拒绝覆盖以避免无法备份。");
-    const backupDirectory = "/.aetherplay-debug-backups";
-    if (!fs.analyzePath(backupDirectory).exists) fs.mkdir(backupDirectory);
-    const baseName = path.split("/").filter(Boolean).pop() || "save";
-    const safeBaseName = baseName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
-    backupPath = `${backupDirectory}/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${safeBaseName}`;
-    fs.writeFile(backupPath, oldBytes);
-  }
-  aetherDebugEnsureParents(fs, path);
-  fs.writeFile(path, bytes);
-  const written = aetherDebugToBytes(fs.readFile(path));
-  if (written.byteLength !== bytes.byteLength) throw new Error("导入后校验失败：文件大小不一致。");
-  for (let index = 0; index < bytes.byteLength; index += 1) {
-    if (written[index] !== bytes[index]) throw new Error("导入后校验失败：文件内容不一致。");
-  }
-  return { path, size: bytes.byteLength, backupPath };
-}
-
 function aetherDebugWriteFile(message: AetherDebugCommand): { backupPath: string } {
   const fs = aetherDebugFs();
   const path = aetherDebugNormalizePath(message.path || "");
@@ -406,7 +295,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "export-file" && command !== "import-file") return;
+  if (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file") return;
   try {
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -442,34 +331,6 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, ...result });
       return;
     }
-    // AETHER_WOLF_BINARY_IMPORT: import exact binary bytes to the chosen virtual path.
-    if (command === "import-file") {
-      const result = aetherDebugImportFile(message as AetherDebugCommand);
-      aetherDebugRespond({
-        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
-        command, ok: true, importedFile: { path: result.path, size: result.size }, backupPath: result.backupPath,
-      });
-      return;
-    }
-    // AETHER_WOLF_BINARY_EXPORT: export bytes exactly as stored in WOLF's virtual filesystem.
-    if (command === "export-file") {
-      const fs = aetherDebugFs();
-      const path = aetherDebugNormalizePath(message.path || "");
-      if (path === "/") throw new Error("不能把根目录导出为文件。请先选择存档文件。 ");
-      const info = fs.stat(path);
-      if (aetherDebugModeKind(Number(info.mode) || 0) === "directory") throw new Error("所选路径是目录。请先选择存档文件。");
-      if (Math.max(0, Number(info.size) || 0) > AETHER_DEBUG_MAX_EXPORT_BYTES) {
-        throw new Error("文件超过 16 MiB 导出上限。");
-      }
-      const bytes = aetherDebugToBytes(fs.readFile(path));
-      if (bytes.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) throw new Error("文件实际大小超过 16 MiB 导出上限。");
-      aetherDebugRespond({
-        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
-        command, ok: true,
-        exportedFile: { path, size: bytes.byteLength, data: aetherDebugToBase64(bytes) },
-      });
-      return;
-    }
     if (command === "read-file") {
       const file = aetherDebugReadFile(message.path || "/");
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, file });
@@ -490,7 +351,7 @@ function showStatus(message: string) {
   if (target) target.textContent = message;
 }
 
-function requestAssets(settings: WolfPlayerConfig): Promise<{ assets: WolfAsset[]; savedFiles: WolfSavedFile[] }> {
+function requestAssets(settings: WolfPlayerConfig): Promise<WolfAsset[]> {
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
@@ -516,7 +377,7 @@ function requestAssets(settings: WolfPlayerConfig): Promise<{ assets: WolfAsset[
         reject(new Error("The browser player did not provide WOLF assets."));
         return;
       }
-      resolve({ assets: message.assets, savedFiles: Array.isArray(message.savedFiles) ? message.savedFiles : [] });
+      resolve(message.assets);
     }
 
     window.addEventListener("message", onMessage);
@@ -528,7 +389,7 @@ function requestAssets(settings: WolfPlayerConfig): Promise<{ assets: WolfAsset[
   });
 }
 
-function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
+function installAssetLoader(assets: WolfAsset[]) {
   const available = new Map<string, WolfAsset>();
   for (const asset of assets) {
     const path = normalizeWolfPath(asset.path);
@@ -553,6 +414,174 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
       current += `/${part}`;
       if (!FS.analyzePath(current).exists) FS.mkdir(current);
     }
+  }
+
+  // Android external saves are the source of truth when the game folder has a SAF permission.
+  const checkedExternalSavePaths = new Set<string>();
+  let writingExternalSaveIntoVirtualFs = false;
+
+  function externalSaveRelativePath(pathInput: unknown): string | undefined {
+    const value = String(pathInput ?? "").replace(/\\/g, "/").replace(/\/+/g, "/");
+    const normalized = value.replace(/\/+/g, "/").replace(/^\/+/, "");
+    const match = normalized.match(/^data0\/[^/]+-(?:Save|GameCache)\/Save\/(SaveData\d+\.sav)$/iu);
+    return match ? `Save/${match[1]}` : undefined;
+  }
+
+  function loadExternalSave(pathInput: unknown): boolean {
+    if (writingExternalSaveIntoVirtualFs || !config?.gameId) return false;
+    const relativePath = externalSaveRelativePath(pathInput);
+    if (!relativePath) return false;
+    const virtualPath = `/${normalizeWolfPath(String(pathInput))}`;
+    const checkKey = virtualPath.toLowerCase();
+    if (checkedExternalSavePaths.has(checkKey)) return false;
+    checkedExternalSavePaths.add(checkKey);
+
+    try {
+      const encoded = relativePath.split("/").map(encodeURIComponent).join("/");
+      const request = new XMLHttpRequest();
+      request.open("GET", `${window.location.origin}/__save__/${encodeURIComponent(config.gameId)}/${encoded}`, false);
+      request.overrideMimeType("text/plain; charset=x-user-defined");
+      request.send(null);
+      if (request.status < 200 || request.status >= 300) return false;
+
+      const bytes = new Uint8Array(request.responseText.length);
+      for (let index = 0; index < request.responseText.length; index += 1) {
+        bytes[index] = request.responseText.charCodeAt(index) & 255;
+      }
+      if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) return false;
+      ensureParents(virtualPath);
+      writingExternalSaveIntoVirtualFs = true;
+      try {
+        FS.writeFile(virtualPath, bytes);
+      } finally {
+        writingExternalSaveIntoVirtualFs = false;
+      }
+      console.info(`AetherPlay: loaded external WOLF save ${relativePath} (${bytes.byteLength} bytes)`);
+      return true;
+    } catch (error) {
+      console.warn("AetherPlay: could not read external WOLF save", error);
+      return false;
+    }
+  }
+
+  function installExternalSaveWriteback(): void {
+    type AnyFn = (...args: unknown[]) => unknown;
+    type Mount = { mountpoint?: unknown; type?: Record<string, unknown> };
+    type RuntimeFs = Record<string, unknown> & {
+      mounts?: Mount[];
+      syncfs?: AnyFn;
+      readdir?: (path: string) => string[];
+      analyzePath?: (path: string) => { exists: boolean };
+      readFile?: (path: string) => Uint8Array | string;
+      stat?: (path: string) => { size?: number; mode?: number; mtime?: number };
+    };
+    const fs = FS as unknown as RuntimeFs;
+    const originalSyncfs = fs.syncfs;
+    if (typeof originalSyncfs !== "function") return;
+    const wrappedTypes = new WeakSet<object>();
+    const sentFingerprints = new Map<string, string>();
+
+    const fingerprint = (bytes: Uint8Array): string => {
+      let left = 0x811c9dc5;
+      let right = 0x9e3779b9;
+      for (let index = 0; index < bytes.length; index += 1) {
+        left = Math.imul(left ^ bytes[index], 0x01000193) >>> 0;
+        right = Math.imul(right ^ (bytes[index] + index), 0x85ebca6b) >>> 0;
+      }
+      return `${bytes.length}:${left.toString(16)}:${right.toString(16)}`;
+    };
+
+    let publishTimer: number | undefined;
+    const publishSavesAfterSync = (): void => {
+      if (!config?.gameId || !fs.readdir || !fs.readFile || !fs.analyzePath) return;
+      // BrowserWoditor can touch both -GameCache/Save and -Save/Save. Wait until
+      // the mount callbacks settle, then prefer the newest copy (GameCache wins ties).
+      const candidates = new Map<string, { name: string; bytes: Uint8Array; rank: number; path: string }>();
+      try {
+        if (!fs.analyzePath("/data0").exists) return;
+        for (const rootName of fs.readdir("/data0")) {
+          const rootMatch = rootName.match(/^([^/]+)-(GameCache|Save)$/iu);
+          if (!rootMatch) continue;
+          const mountpoint = `/data0/${rootName}`;
+          const saveDir = `${mountpoint}/Save`;
+          try {
+            if (!fs.analyzePath(saveDir).exists) continue;
+            const rank = rootMatch[2].toLowerCase() === "gamecache" ? 1 : 0;
+            for (const name of fs.readdir(saveDir)) {
+              if (!/^SaveData\d+\.sav$/iu.test(name)) continue;
+              const path = `${saveDir}/${name}`;
+              try {
+                // Refresh from SAF before exporting: otherwise startup sync could replace a newer external save with stale IDBFS bytes.
+                loadExternalSave(path);
+                const source = fs.readFile(path);
+                const bytes = source instanceof Uint8Array ? Uint8Array.from(source) : Uint8Array.from(source, char => char.charCodeAt(0) & 255);
+                // Never replace a real external save with a transient empty file created during a save operation.
+                if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) continue;
+                const key = name.toLowerCase();
+                const previous = candidates.get(key);
+                // The running WOLF game writes under -GameCache. Prefer that copy when both mounts have a slot.
+                if (!previous || rank > previous.rank) candidates.set(key, { name, bytes, rank, path });
+              } catch (error) {
+                console.warn(`AetherPlay: could not inspect WOLF save ${path}`, error);
+              }
+            }
+          } catch (error) {
+            console.warn(`AetherPlay: could not list WOLF saves under ${saveDir}`, error);
+          }
+        }
+        for (const candidate of candidates.values()) {
+          const relativePath = `Save/${candidate.name}`;
+          const key = relativePath.toLowerCase();
+          const valueFingerprint = fingerprint(candidate.bytes);
+          if (sentFingerprints.get(key) === valueFingerprint) continue;
+          sentFingerprints.set(key, valueFingerprint);
+          const data = candidate.bytes.buffer.slice(candidate.bytes.byteOffset, candidate.bytes.byteOffset + candidate.bytes.byteLength) as ArrayBuffer;
+          window.parent.postMessage({ type: "wolf-save-written", gameId: config.gameId, path: relativePath, data }, window.location.origin);
+        }
+      } catch (error) {
+        console.warn("AetherPlay: could not collect WOLF saves after IDBFS sync", error);
+      }
+    };
+    const scheduleSavePublish = (): void => {
+      if (publishTimer !== undefined) window.clearTimeout(publishTimer);
+      publishTimer = window.setTimeout(() => {
+        publishTimer = undefined;
+        publishSavesAfterSync();
+      }, 450);
+    };
+
+    const installMountHooks = (): void => {
+      if (!Array.isArray(fs.mounts)) return;
+      for (const mount of fs.mounts) {
+        const type = mount?.type;
+        if (!type || typeof type !== "object" || wrappedTypes.has(type)) continue;
+        const sync = type.syncfs;
+        if (typeof sync !== "function") continue;
+        wrappedTypes.add(type);
+        type.syncfs = function (...args: unknown[]): unknown {
+          const mountInfo = args[0] as { mountpoint?: unknown } | undefined;
+          const mountpoint = String(mountInfo?.mountpoint ?? "").replace(/\/+$/, "");
+          const populate = args[1] === true;
+          const callback = args[2];
+          const isSaveMount = /\/[^/]+-(?:GameCache|Save)$/iu.test(mountpoint);
+          if (!isSaveMount || populate || typeof callback !== "function") {
+            return (sync as AnyFn).apply(type, args);
+          }
+          const nextArgs = args.slice();
+          nextArgs[2] = function (error?: unknown): unknown {
+            if (error == null) scheduleSavePublish();
+            return (callback as (error?: unknown) => unknown)(error);
+          };
+          return (sync as AnyFn).apply(type, nextArgs);
+        };
+      }
+    };
+
+    fs.syncfs = function (...args: unknown[]): unknown {
+      installMountHooks();
+      return (originalSyncfs as AnyFn).apply(FS, args);
+    };
+    installMountHooks();
   }
 
   function load(path: unknown): boolean {
@@ -603,281 +632,31 @@ function installAssetLoader(assets: WolfAsset[], savedFiles: WolfSavedFile[]) {
 
   runtimeModule.preRun.push((initializedModule) => {
     activeModule = initializedModule ?? runtimeModule;
-    // AETHER_WOLF_SAVE_PERSISTENCE_V1: restore IndexedDB-backed overrides before WOLF starts.
-    const originalWriteFile = FS.writeFile;
-    let restoredCount = 0;
-    for (const save of savedFiles) {
-      const path = normalizeWolfPath(save.path);
-      if (!path || !(save.data instanceof ArrayBuffer) || save.data.byteLength > AETHER_DEBUG_MAX_EXPORT_BYTES) continue;
-      try {
-        ensureParents(`/${path}`);
-        originalWriteFile.call(FS, `/${path}`, new Uint8Array(save.data));
-        restoredCount += 1;
-      } catch (cause) {
-        console.warn(`AetherPlay: failed to restore WOLF save ${path}`, cause);
-      }
-    }
-    if (restoredCount) console.info(`AetherPlay: restored ${restoredCount} persistent WOLF save file(s).`);
-
-    // AETHER_WOLF_SAVE_TRACE_V2: only save files; identify each actual IDBFS mount.
-    {
-      type TraceFn = (...args: unknown[]) => unknown;
-      type TraceMount = { mountpoint?: unknown; type?: Record<string, unknown> };
-      const traceFs = FS as unknown as Record<string, unknown>;
-      const traceGameId = config?.gameId;
-      let traceCount = 0;
-      let syncSequence = 0;
-      const traceLimit = 240;
-      const streamTrace = new WeakMap<object, { path: string; writes: number; bytes: number; flags: string }>();
-      const wrappedMountTypes = new WeakSet<object>();
-
-      const normalizeTracePath = (value: unknown): string =>
-        String(value ?? "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "").toLowerCase();
-
-      // Keep file tracing limited to actual save-like files. Do not count failed
-      // probes for Game.ini.wolfx, Data.wolf, images, fonts, or other game assets.
-      const isSaveFile = (value: unknown): boolean => {
-        const path = normalizeTracePath(value);
-        const inSaveArea = path.includes("-save/")
-          || path.includes("-gamecache/save/")
-          || /(?:^|\/)save(?:\/|$)/u.test(path);
-        const saveExtension = /\.(?:sav|save|wolfsave)$/u.test(path);
-        const saveSlotName = /(?:^|\/)savedata\d+[^/]*$/u.test(path);
-        return inSaveArea && (saveExtension || saveSlotName);
-      };
-
-      const isSaveMount = (value: unknown): boolean => {
-        const path = normalizeTracePath(value);
-        return /(?:^|\/)[^/]+-(?:save|gamecache)$/u.test(path);
-      };
-
-      const emitTrace = (eventName: string, path: string, details = "") => {
-        if (traceCount >= traceLimit || !traceGameId) return;
-        traceCount += 1;
-        const line = `[SAVE-TRACE] ${eventName} ${path}${details ? ` | ${details}` : ""}`;
-        try { console.info(line); } catch { /* tracing must never break the game */ }
-        try {
-          window.parent.postMessage({
-            type: "wolf-save-trace", gameId: traceGameId,
-            event: eventName, path, details, line, at: Date.now(),
-          }, window.location.origin);
-        } catch { /* parent logging is optional */ }
-      };
-
-      const asTraceFn = (value: unknown): TraceFn | undefined =>
-        typeof value === "function" ? value as TraceFn : undefined;
-
-      // FS.syncfs() synchronizes every mounted filesystem. Instrument the
-      // per-mount IDBFS syncfs callback so the log names the actual mountpoint.
-      const installMountSyncHooks = () => {
-        const mounts = traceFs.mounts;
-        if (!Array.isArray(mounts)) return;
-        for (const item of mounts as TraceMount[]) {
-          const type = item?.type;
-          if (!type || typeof type !== "object" || wrappedMountTypes.has(type)) continue;
-          const oldMountSync = asTraceFn(type.syncfs);
-          if (!oldMountSync) continue;
-          wrappedMountTypes.add(type);
-          type.syncfs = function (...args: unknown[]): unknown {
-            const mountArg = args[0] as { mountpoint?: unknown } | undefined;
-            const mountPath = String(mountArg?.mountpoint ?? "unknown-mount");
-            const populate = args[1] === true;
-            const callback = args[2];
-            if (!isSaveMount(mountPath) || typeof callback !== "function") {
-              return oldMountSync.apply(type, args);
-            }
-            const sequence = ++syncSequence;
-            emitTrace("IDBFS_SYNC_BEGIN", mountPath, `populate=${populate} sequence=${sequence}`);
-            const newArgs = args.slice();
-            newArgs[2] = function (error?: unknown): unknown {
-              const errorText = error == null ? "" : (error instanceof Error ? `${error.name}: ${error.message}` : (() => {
-                try { return JSON.stringify(error); } catch { return String(error); }
-              })());
-              emitTrace(error == null ? "IDBFS_SYNC_DONE" : "IDBFS_SYNC_ERROR", mountPath,
-                `populate=${populate} sequence=${sequence}${errorText ? ` error=${errorText}` : ""}`);
-              return (callback as (error?: unknown) => unknown)(error);
-            };
-            return oldMountSync.apply(type, newArgs);
-          };
-        }
-      };
-
-      const oldSyncfs = asTraceFn(traceFs.syncfs);
-      if (oldSyncfs) {
-        traceFs.syncfs = function (...args: unknown[]): unknown {
-          installMountSyncHooks();
-          return oldSyncfs.apply(FS, args);
-        };
-      }
-
-      const oldOpen = asTraceFn(traceFs.open);
-      if (oldOpen) {
-        traceFs.open = function (...args: unknown[]): unknown {
-          const rawPath = typeof args[0] === "string" ? args[0] : String(args[0] ?? "");
-          const path = normalizeTracePath(rawPath);
-          const flags = args[1];
-          const writable = typeof flags === "string"
-            ? /[wa+]/u.test(flags)
-            : (typeof flags === "number" && (flags & 3) !== 0);
-          let stream: unknown;
-          try {
-            stream = oldOpen.apply(FS, args);
-          } catch (error) {
-            if (isSaveFile(path)) {
-              const errorText = error instanceof Error ? `${error.name}: ${error.message}` : (() => {
-                try { return JSON.stringify(error); } catch { return String(error); }
-              })();
-              emitTrace("OPEN_ERROR", path, `flags=${String(flags)} error=${errorText}`);
-            }
-            throw error;
-          }
-          if (isSaveFile(path)) {
-            emitTrace(writable ? "OPEN_WRITE" : "OPEN_READ", path, `flags=${String(flags)}`);
-            if (stream && typeof stream === "object" && writable) {
-              streamTrace.set(stream as object, { path, writes: 0, bytes: 0, flags: String(flags) });
-            }
-          }
-          return stream;
-        };
-      }
-
-      const oldWrite = asTraceFn(traceFs.write);
-      if (oldWrite) {
-        traceFs.write = function (...args: unknown[]): unknown {
-          const stream = args[0];
-          if (stream && typeof stream === "object") {
-            const details = streamTrace.get(stream as object);
-            if (details) {
-              details.writes += 1;
-              if (typeof args[3] === "number") details.bytes += Math.max(0, args[3]);
-              if (details.writes === 1) emitTrace("WRITE_FIRST", details.path, `requestedBytes=${String(args[3] ?? "?")}`);
-            }
-          }
-          return oldWrite.apply(FS, args);
-        };
-      }
-
-      const oldClose = asTraceFn(traceFs.close);
-      if (oldClose) {
-        traceFs.close = function (...args: unknown[]): unknown {
-          const stream = args[0];
-          const details = stream && typeof stream === "object" ? streamTrace.get(stream as object) : undefined;
-          const result = oldClose.apply(FS, args);
-          if (details) {
-            let size = "unknown";
-            try {
-              const statFn = asTraceFn(traceFs.stat);
-              if (statFn) {
-                const stat = statFn.call(FS, details.path) as { size?: unknown };
-                size = String(stat?.size ?? "unknown");
-              }
-            } catch { size = "missing-after-close"; }
-            emitTrace("CLOSE_WRITE", details.path,
-              `flags=${details.flags} writes=${details.writes} bytes=${details.bytes} finalSize=${size}`);
-          }
-          return result;
-        };
-      }
-
-      const oldWriteFile = asTraceFn(traceFs.writeFile);
-      if (oldWriteFile) {
-        traceFs.writeFile = function (...args: unknown[]): unknown {
-          const path = typeof args[0] === "string" ? normalizeTracePath(args[0]) : String(args[0] ?? "");
-          const content = args[1] as { byteLength?: number; length?: number } | string | undefined;
-          const byteCount = typeof content === "string" ? content.length
-            : content && typeof content === "object" ? Number(content.byteLength ?? content.length ?? 0) : 0;
-          const result = oldWriteFile.apply(FS, args);
-          if (isSaveFile(path)) emitTrace("WRITE_FILE", path, `bytes=${byteCount}`);
-          return result;
-        };
-      }
-
-      const oldRename = asTraceFn(traceFs.rename);
-      if (oldRename) {
-        traceFs.rename = function (...args: unknown[]): unknown {
-          const from = normalizeTracePath(args[0]);
-          const to = normalizeTracePath(args[1]);
-          const result = oldRename.apply(FS, args);
-          if (isSaveFile(from) || isSaveFile(to)) emitTrace("RENAME", `${from} -> ${to}`);
-          return result;
-        };
-      }
-
-      const oldUnlink = asTraceFn(traceFs.unlink);
-      if (oldUnlink) {
-        traceFs.unlink = function (...args: unknown[]): unknown {
-          const path = normalizeTracePath(args[0]);
-          const result = oldUnlink.apply(FS, args);
-          if (isSaveFile(path)) emitTrace("UNLINK", path);
-          return result;
-        };
-      }
-
-      emitTrace("INSTALLED", "BrowserWoditor FS hooks", "v2: only save files; sync logs identify each mounted filesystem");
-    }
-
+    installExternalSaveWriteback();
     const originalOpen = FS.open;
     const originalStat = FS.stat;
     const originalLstat = FS.lstat;
-    const fsIo = FS as unknown as {
-      close?: (...args: unknown[]) => unknown;
-      rename?: (...args: unknown[]) => unknown;
-      readFile: (path: string) => Uint8Array | string;
-      stat: (path: string) => { size: number; mode: number };
-      analyzePath: (path: string) => { exists: boolean };
-      writeFile: (...args: unknown[]) => unknown;
-    };
-    const originalClose = fsIo.close;
-    const originalRename = fsIo.rename;
-    const saveStreams = new WeakMap<object, string>();
 
     FS.open = function(path, flags) {
       const readOnly = typeof flags === "string"
         ? !/[wa+]/.test(flags)
         : ((flags as number) & 3) === 0;
-      if (readOnly) load(path);
-      const stream = originalOpen.apply(FS, arguments as unknown as []);
-      if (!readOnly && stream && typeof stream === "object" && isPersistentWolfSavePath(String(path))) {
-        saveStreams.set(stream as object, String(path));
+      if (!writingExternalSaveIntoVirtualFs) {
+        if (readOnly) load(path);
+        // Query SAF even if an older copy is already present in IDBFS; the external
+        // file replaces it once per virtual path before BrowserWoditor consumes it.
+        loadExternalSave(path);
       }
-      return stream;
+      return originalOpen.apply(FS, arguments as unknown as []);
     };
-
-    // A write may use either FS.writeFile() or open/write/close. Capturing close
-    // persists the final bytes after the runtime has flushed the save stream.
-    if (typeof originalClose === "function") {
-      fsIo.close = function(stream: unknown) {
-        const path = stream && typeof stream === "object" ? saveStreams.get(stream as object) : undefined;
-        const result = originalClose.apply(FS, arguments as unknown as []);
-        if (path) persistWolfSaveFromVirtualFs(path);
-        return result;
-      };
-    }
-    // Atomic save implementations often write a temporary file, then rename it.
-    if (typeof originalRename === "function") {
-      fsIo.rename = function(oldPath: unknown, newPath: unknown) {
-        void oldPath;
-        const result = originalRename.apply(FS, arguments as unknown as []);
-        if (typeof newPath === "string" && isPersistentWolfSavePath(newPath)) persistWolfSaveFromVirtualFs(newPath);
-        return result;
-      };
-    }
-    // Some Emscripten builds implement FS.writeFile without public open/close;
-    // retain a fallback only when close interception is unavailable.
-    if (typeof originalClose !== "function") {
-      const originalWriteFileForPersistence = fsIo.writeFile;
-      fsIo.writeFile = function(path: unknown, ...args: unknown[]) {
-        const result = originalWriteFileForPersistence.apply(FS, [path, ...args]);
-        if (typeof path === "string" && isPersistentWolfSavePath(path)) persistWolfSaveFromVirtualFs(path);
-        return result;
-      };
-    }
     FS.stat = function(path) {
       load(path);
+      loadExternalSave(path);
       return originalStat.apply(FS, arguments as unknown as []);
     };
     FS.lstat = function(path) {
       load(path);
+      loadExternalSave(path);
       return originalLstat.apply(FS, arguments as unknown as []);
     };
   });
@@ -914,8 +693,8 @@ async function start() {
       throw new Error("The WOLF loose-asset runtime script is missing.");
     }
     showStatus("Preparing WOLF assets");
-    const response = await requestAssets(config);
-    installAssetLoader(response.assets, response.savedFiles);
+    const assets = await requestAssets(config);
+    installAssetLoader(assets);
     await loadWoditor(config.woditorSrc);
   }
 }
