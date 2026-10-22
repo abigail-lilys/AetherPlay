@@ -3,13 +3,12 @@ import { normalizeStoredPath } from "@/src/lib/paths";
 import type { GameRecord, StoredGameFile, ZipArchiveFileEntry } from "@/src/lib/types";
 
 const DB_NAME = "mvmz-browser-player";
-const DB_VERSION = 3; // AETHER_WOLF_SAVE_PERSISTENCE_V1
+const DB_VERSION = 3; // Keep the existing WebView DB version; old wolfSaves data is now unused.
 const GAME_STORE = "games";
 const FILE_STORE = "files";
 const BLOB_STORE = "blobs";
 const HANDLE_STORE = "handles";
-const WOLF_SAVE_STORE = "wolfSaves";
-const DELETE_GAME_STORES = [GAME_STORE, FILE_STORE, BLOB_STORE, HANDLE_STORE, WOLF_SAVE_STORE] as const;
+const DELETE_GAME_STORES = [GAME_STORE, FILE_STORE, BLOB_STORE, HANDLE_STORE] as const;
 
 export type BrowserFileSystemPermissionMode = "read" | "readwrite";
 export type BrowserFileSystemPermissionState = "granted" | "denied" | "prompt";
@@ -95,10 +94,6 @@ async function openPlayerDb(): Promise<IDBDatabase> {
     if (!db.objectStoreNames.contains(HANDLE_STORE)) {
       db.createObjectStore(HANDLE_STORE, { keyPath: "gameId" });
     }
-    if (!db.objectStoreNames.contains(WOLF_SAVE_STORE)) {
-      const saves = db.createObjectStore(WOLF_SAVE_STORE, { keyPath: "key" });
-      saves.createIndex("gameId", "gameId", { unique: false });
-    }
   };
 
   return requestToPromise(request);
@@ -136,15 +131,6 @@ export async function deleteGame(gameId: string): Promise<void> {
     const transaction = db.transaction([...DELETE_GAME_STORES], "readwrite");
     transaction.objectStore(GAME_STORE).delete(gameId);
     transaction.objectStore(HANDLE_STORE).delete(gameId);
-
-    const saveIndex = transaction.objectStore(WOLF_SAVE_STORE).index("gameId");
-    const saveRequest = saveIndex.openCursor(IDBKeyRange.only(gameId));
-    saveRequest.onsuccess = () => {
-      const cursor = saveRequest.result;
-      if (!cursor) return;
-      cursor.delete();
-      cursor.continue();
-    };
 
     const fileIndex = transaction.objectStore(FILE_STORE).index("gameId");
     const fileRequest = fileIndex.openCursor(IDBKeyRange.only(gameId));
@@ -293,52 +279,6 @@ export async function getIndexedDbBlobs(storageRefs: string[]): Promise<Map<stri
     return new Map(
       records.filter((record): record is readonly [string, Blob] => Boolean(record[1])),
     );
-  } finally {
-    db.close();
-  }
-}
-
-// AETHER_WOLF_SAVE_PERSISTENCE_V1
-export interface WolfSaveBlobRecord {
-  path: string;
-  blob: Blob;
-  size: number;
-  updatedAt: string;
-}
-
-const MAX_PERSISTED_WOLF_SAVE_BYTES = 16 * 1024 * 1024;
-
-/** Persist a WOLF runtime save/override as exact bytes in IndexedDB. */
-export async function putWolfSaveBlob(gameId: string, path: string, blob: Blob): Promise<void> {
-  const normalizedPath = normalizeStoredPath(path);
-  if (!gameId || !normalizedPath) throw new Error("Invalid WOLF save identity or path.");
-  if (blob.size > MAX_PERSISTED_WOLF_SAVE_BYTES) {
-    throw new Error("WOLF save exceeds the 16 MiB persistent-save limit.");
-  }
-  const key = fileKey(gameId, normalizedPath);
-  const db = await openPlayerDb();
-  try {
-    const transaction = db.transaction(WOLF_SAVE_STORE, "readwrite");
-    transaction.objectStore(WOLF_SAVE_STORE).put({
-      key, gameId, path: normalizedPath, size: blob.size,
-      updatedAt: new Date().toISOString(), blob,
-    });
-    await transactionDone(transaction);
-  } finally {
-    db.close();
-  }
-}
-
-/** Return persistent WOLF save overrides for the next runtime startup. */
-export async function getWolfSaveBlobs(gameId: string): Promise<WolfSaveBlobRecord[]> {
-  const db = await openPlayerDb();
-  try {
-    const transaction = db.transaction(WOLF_SAVE_STORE, "readonly");
-    const records = await requestToPromise<Array<WolfSaveBlobRecord & { key: string; gameId: string }>>(
-      transaction.objectStore(WOLF_SAVE_STORE).index("gameId").getAll(IDBKeyRange.only(gameId)),
-    );
-    return records.map(({ path, blob, size, updatedAt }) => ({ path, blob, size, updatedAt }))
-      .sort((a, b) => a.path.localeCompare(b.path));
   } finally {
     db.close();
   }
