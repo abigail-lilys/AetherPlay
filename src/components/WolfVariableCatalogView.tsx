@@ -1,11 +1,16 @@
 import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
+import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 
 interface WolfVariableCatalogViewProps {
   catalog: WolfVariableCatalog | null;
   loading: boolean;
   onLoad: () => void;
+  hpChain: WolfHpPointerChainSnapshot | null;
+  hpChainBusy: boolean;
+  onRefreshHpChain: () => void;
+  onWriteHpChain: (value: string) => void;
 }
 
 const cardStyle: CSSProperties = {
@@ -21,12 +26,72 @@ const buttonStyle: CSSProperties = {
   background: "#182335", fontSize: 13, fontWeight: 650, cursor: "pointer",
 };
 
-export function WolfVariableCatalogView({ catalog, loading, onLoad }: WolfVariableCatalogViewProps) {
+function formatAddress(value: number): string {
+  return `0x${value.toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+export function WolfVariableCatalogView({
+  catalog, loading, onLoad, hpChain, hpChainBusy, onRefreshHpChain, onWriteHpChain,
+}: WolfVariableCatalogViewProps) {
   const [selectedGroupId, setSelectedGroupId] = useState("normal");
   const [query, setQuery] = useState("");
+  const [targetHp, setTargetHp] = useState("999");
+  const hpTargetNumber = Number(targetHp.trim());
+  const hpTargetValid = /^-?\d+$/u.test(targetHp.trim())
+    && Number.isSafeInteger(hpTargetNumber)
+    && hpTargetNumber >= -2147483648 && hpTargetNumber <= 2147483647;
+
+  const hpPanel = (
+    <div style={{ ...cardStyle, borderColor: "#42618a" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 15, fontWeight: 750 }}>实时变量：HP</div>
+        <span style={{ ...mutedStyle, whiteSpace: "nowrap" }}>WOLF / Int32</span>
+      </div>
+      <p style={{ ...mutedStyle, lineHeight: 1.6, margin: "8px 0 10px" }}>
+        动态指针链：0x0045E598 → p1 + 0x84 → p2 → p3 + 0x08。每次读取和写入都会重新解析指针。
+      </p>
+      {hpChain ? (
+        <div style={{ border: "1px solid #253247", borderRadius: 10, padding: 10, marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+            <span style={mutedStyle}>当前 HP</span>
+            <strong style={{ fontSize: 25, color: "#b8f3da" }}>{hpChain.hpValue}</strong>
+          </div>
+          <div style={{ ...mutedStyle, marginTop: 7, lineHeight: 1.7, overflowWrap: "anywhere" }}>
+            根地址 {formatAddress(hpChain.rootOffset)} → p1 {formatAddress(hpChain.p1)}<br />
+            指针槽 {formatAddress(hpChain.slotOffset)} → p2 {formatAddress(hpChain.p2)}<br />
+            p3 {formatAddress(hpChain.p3)} → HP 地址 {formatAddress(hpChain.hpAddress)}
+          </div>
+          <div style={{ ...mutedStyle, marginTop: 6 }}>
+            内存 {Math.round(hpChain.memoryBytes / 1048576)} MiB · {new Date(hpChain.resolvedAt).toLocaleTimeString()}
+          </div>
+        </div>
+      ) : (
+        <div style={{ ...mutedStyle, lineHeight: 1.6, marginBottom: 10 }}>
+          尚未读取当前游戏的 HP。读取时会检查每级指针和内存边界。
+        </div>
+      )}
+      <button type="button" disabled={hpChainBusy} onClick={onRefreshHpChain} style={{ ...buttonStyle, width: "100%" }}>
+        {hpChainBusy ? "正在解析指针链…" : hpChain ? "重新读取实时 HP" : "读取实时 HP"}
+      </button>
+      <label style={{ ...mutedStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
+        新 HP（Int32）
+        <input type="number" step="1" value={targetHp}
+          onChange={(event) => setTargetHp(event.target.value)} style={controlStyle} />
+      </label>
+      <button type="button" disabled={!hpChain || hpChainBusy || !hpTargetValid}
+        onClick={() => onWriteHpChain(targetHp)}
+        style={{ ...buttonStyle, width: "100%", marginTop: 8, borderColor: "#4b7a68" }}>
+        写入 HP 并回读验证
+      </button>
+      <div style={{ ...mutedStyle, lineHeight: 1.6, marginTop: 8 }}>
+        写入前会重新解析指针链，并确认 HP 仍等于记录值；旧值不匹配就取消写入。根址跨完整游戏重启的稳定性仍需实测。
+      </div>
+    </div>
+  );
   if (!catalog) {
     return (
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {hpPanel}
         <div style={cardStyle}>
           <div style={{ fontSize: 15, fontWeight: 750 }}>WOLF 变量目录</div>
           <p style={{ ...mutedStyle, lineHeight: 1.6, margin: "8px 0 12px" }}>
@@ -56,6 +121,7 @@ export function WolfVariableCatalogView({ catalog, loading, onLoad }: WolfVariab
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {hpPanel}
       <div style={cardStyle}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
           <div style={{ fontSize: 15, fontWeight: 750 }}>WOLF 变量目录</div>

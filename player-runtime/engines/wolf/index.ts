@@ -28,6 +28,7 @@ import { normalizeWolfPath, wolfPathKeys } from "@/player-runtime/engines/wolf/p
 import { installWolfCompatibility } from "@/player-runtime/engines/wolf/compatibility";
 import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibility";
 import { createWasmMemoryScanner, type WasmScanFilter, type WasmScanType } from "@/player-runtime/engines/wolf/memoryScanner";
+import { resolveWolfHpPointerChain, writeWolfHpPointerChain, type WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { buildWolfVariableCatalog, type WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import { inspectWasmRuntimeSurface, summarizeWasmExports, summarizeWasmImports, type AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 
@@ -56,7 +57,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -70,6 +71,7 @@ type AetherDebugCommand = {
   aligned?: boolean;
   offset?: number;
   value?: number;
+  expectedValue?: number;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -91,6 +93,7 @@ type AetherDebugResponse = {
   variableCatalog?: WolfVariableCatalog;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
+  hpChain?: WolfHpPointerChainSnapshot;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -466,7 +469,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write")) return;
   try {
     if (command === "runtime-introspect") {
       const runtimeIntrospection = aetherDebugInspectRuntimeSurface();
@@ -516,6 +519,24 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       const paths = aetherDebugMetadataAssetPaths();
       const variableCatalog = buildWolfVariableCatalog(paths, aetherDebugReadMetadataAsset);
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, variableCatalog });
+      return;
+    }
+    if (command === "hp-chain-read") {
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer) throw new Error("尚未取得可读的 WASM 内存，请等待游戏初始化完成。");
+      const hpChain = resolveWolfHpPointerChain(new DataView(buffer));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, hpChain });
+      return;
+    }
+    if (command === "hp-chain-write") {
+      if (typeof message.expectedValue !== "number" || !Number.isFinite(message.expectedValue))
+        throw new Error("缺少有效的预期旧 HP，请先刷新实时 HP。");
+      if (typeof message.value !== "number" || !Number.isFinite(message.value))
+        throw new Error("新 HP 必须是有效的 Int32 数值。");
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer) throw new Error("尚未取得可写的 WASM 内存。");
+      const hpChain = writeWolfHpPointerChain(new DataView(buffer), message.expectedValue, message.value);
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, hpChain });
       return;
     }
     if (command === "scan-first") {

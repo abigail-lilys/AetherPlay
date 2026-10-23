@@ -3,9 +3,10 @@ import { Capacitor } from "@capacitor/core";
 import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
+import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -64,8 +65,9 @@ interface DebugResponse {
   variableCatalog?: WolfVariableCatalog;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
+  hpChain?: WolfHpPointerChainSnapshot;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; expectedValue?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -138,11 +140,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [variableCatalog, setVariableCatalog] = useState<WolfVariableCatalog | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
   // Read-only validation for a user-supplied, known WOLF variable address.
-  const [directAddressText, setDirectAddressText] = useState("0x078e5588");
+  const [directAddressText, setDirectAddressText] = useState("0x0795c0b0");
   const [directAddressType, setDirectAddressType] = useState<DebugScanType>("i32");
   const [directMemoryValue, setDirectMemoryValue] = useState<number | null>(null);
   const [directMemoryReadOffset, setDirectMemoryReadOffset] = useState<number | null>(null);
   const [directMemoryReadAt, setDirectMemoryReadAt] = useState("");
+  const [hpChain, setHpChain] = useState<WolfHpPointerChainSnapshot | null>(null);
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -307,6 +310,46 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally {
       setBusy("");
     }
+  };
+
+  const refreshHpChain = async () => {
+    setBusy("正在重新解析动态 HP 指针链…"); setError(""); setNotice("");
+    try {
+      const response = await request("hp-chain-read");
+      if (!response.hpChain) throw new Error("运行时没有返回 HP 指针链。");
+      setHpChain(response.hpChain);
+      setDirectAddressText(`0x${response.hpChain.hpAddress.toString(16).toUpperCase().padStart(8, "0")}`);
+      setDirectAddressType("i32");
+      setDirectMemoryValue(response.hpChain.hpValue);
+      setDirectMemoryReadOffset(response.hpChain.hpAddress);
+      setDirectMemoryReadAt(new Date().toLocaleTimeString());
+      setNotice(`实时 HP 已读取：${response.hpChain.hpValue}，地址 0x${response.hpChain.hpAddress.toString(16).toUpperCase().padStart(8, "0")}。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
+  const writeHpChain = async (rawValue: string) => {
+    setError(""); setNotice("");
+    try {
+      if (!hpChain) throw new Error("请先读取实时 HP 指针链。");
+      const value = readNumericInput(rawValue, "新的 HP");
+      if (!Number.isSafeInteger(value) || value < -2147483648 || value > 2147483647)
+        throw new Error("新的 HP 必须是 Int32 整数（-2147483648 至 2147483647）。");
+      if (!window.confirm(`即将修改游戏实时 HP：\n\n当前记录值：${hpChain.hpValue}\n新值：${value}\n\n写入前会重新解析指针链并核对旧值。继续吗？`)) return;
+      setBusy("正在重新解析并安全写入 HP…");
+      const response = await request("hp-chain-write", { expectedValue: hpChain.hpValue, value });
+      if (!response.hpChain) throw new Error("运行时没有返回 HP 写入校验结果。");
+      setHpChain(response.hpChain);
+      setDirectAddressText(`0x${response.hpChain.hpAddress.toString(16).toUpperCase().padStart(8, "0")}`);
+      setDirectAddressType("i32");
+      setDirectMemoryValue(response.hpChain.hpValue);
+      setDirectMemoryReadOffset(response.hpChain.hpAddress);
+      setDirectMemoryReadAt(new Date().toLocaleTimeString());
+      setNotice(`HP 修改并回读验证成功：${response.hpChain.hpValue}。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
   };
 
   const applyScanResponse = (response: DebugResponse) => {
@@ -560,14 +603,14 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         ) : null}
 
         {tab === "variables" ? (
-          <WolfVariableCatalogView catalog={variableCatalog} loading={Boolean(busy)} onLoad={() => void loadVariableCatalog()} />
+          <WolfVariableCatalogView catalog={variableCatalog} loading={Boolean(busy)} onLoad={() => void loadVariableCatalog()} hpChain={hpChain} hpChainBusy={Boolean(busy)} onRefreshHpChain={() => void refreshHpChain()} onWriteHpChain={(value) => void writeHpChain(value)} />
         ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>已知地址直接读取（只读）</div>
               <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
-                用于验证已知变量地址。默认填入提供的 HP 地址 0x078e5588；此区域只读，不会修改或锁定内存。
+                用于验证已知变量地址。动态 HP 编辑器会自动刷新地址；此区域仍保留为任意地址只读检查。
               </div>
               <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
                 WASM 字节偏移（十进制或 0x 十六进制）
