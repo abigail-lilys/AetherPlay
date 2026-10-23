@@ -741,7 +741,8 @@ function installAssetLoader(assets: WolfAsset[]) {
     const dirtySavePaths = new Set<string>();
     const dirtySaveGeneration = new Map<string, number>();
     const pendingWritebacks = new Map<string, { fingerprint: string; generation: number }>();
-    const explicitlyAuthorizedReplacementStreams = new WeakSet<object>();
+    // AETHER_EXTERNAL_WOLF_IMPORT_LOCK_UNTIL_NEW_SAVE_V1: stream authorization is scoped to the latest external import epoch.
+    const explicitlyAuthorizedReplacementStreams = new Map<object, { slotKey: string; guardSince: number }>();
     afterExternalSaveImport = (relativePath: string): void => {
       const slotKey = relativePath.split("/").pop()?.toLowerCase();
       if (!slotKey) return;
@@ -752,7 +753,17 @@ function installAssetLoader(assets: WolfAsset[]) {
       dirtySaveGeneration.delete(slotKey);
       pendingWritebacks.delete(slotKey);
       reportWriteback("EXTERNAL_SAVE_IMPORT_STATE_RESET", relativePath,
-        `clearedDirtyPaths=${clearedPaths}; external replacement reset old writeback intent`);
+        `clearedDirtyPaths=${clearedPaths}; external import invalidated prior writeback intent`);
+      // Every successful external import starts a new authority epoch, even if cached
+      // bytes happen to match at import time. Old in-memory save streams cannot overrule it.
+      const guardSince = Date.now();
+      externalReplacementGuardSlots.add(slotKey);
+      externalReplacementGuardSince.set(slotKey, guardSince);
+      for (const [stream, authorization] of explicitlyAuthorizedReplacementStreams) {
+        if (authorization.slotKey === slotKey) explicitlyAuthorizedReplacementStreams.delete(stream);
+      }
+      reportWriteback("EXTERNAL_SAVE_IMPORT_GUARD_ARMED", relativePath,
+        `slot=${slotKey} guardSince=${guardSince}; imported external bytes win until a new eligible game-save stream`);
     };
     let publishTimer: number | undefined;
     let scannedCount = 0;
@@ -777,9 +788,11 @@ function installAssetLoader(assets: WolfAsset[]) {
       const slotKey = saveSlotKey(pathInput);
       if (!slotKey) return;
       if (externalReplacementGuardSlots.has(slotKey)) {
+        const replacementAuthorization = typeof writeStream === "object" && writeStream !== null
+          ? explicitlyAuthorizedReplacementStreams.get(writeStream as object) : undefined;
         const hasExplicitReplacementSaveIntent = source === "FS.write" &&
-          typeof writeStream === "object" && writeStream !== null &&
-          explicitlyAuthorizedReplacementStreams.has(writeStream as object);
+          replacementAuthorization !== undefined && replacementAuthorization.slotKey === slotKey &&
+          replacementAuthorization.guardSince === externalReplacementGuardSince.get(slotKey);
         if (!hasExplicitReplacementSaveIntent) {
           const inputAgeMs = Date.now() - lastExternalSaveUserInputAt;
           const guardKey = `${slotKey}:${source}`;
@@ -855,10 +868,12 @@ function installAssetLoader(assets: WolfAsset[]) {
         if (!insideWriteFile && !writingExternalSaveIntoVirtualFs && slotKey &&
             externalReplacementGuardSlots.has(slotKey) && writeAccess &&
             typeof stream === "object" && stream !== null) {
-          const replacedAt = externalReplacementGuardSince.get(slotKey) ?? Date.now();
+          const guardSince = externalReplacementGuardSince.get(slotKey) ?? 0;
           const inputAgeMs = Date.now() - inputAtOpen;
-          if (inputAtOpen >= replacedAt && inputAgeMs >= 0 && inputAgeMs <= EXTERNAL_SAVE_REPLACEMENT_INTENT_WINDOW_MS) {
-            explicitlyAuthorizedReplacementStreams.add(stream as object);
+          if (guardSince > 0 && inputAtOpen >= guardSince && inputAgeMs >= 0 && inputAgeMs <= EXTERNAL_SAVE_REPLACEMENT_INTENT_WINDOW_MS) {
+            explicitlyAuthorizedReplacementStreams.set(stream as object, { slotKey, guardSince });
+            reportWriteback("EXTERNAL_SAVE_WRITE_STREAM_AUTHORIZED", String(args[0]),
+              `slot=${slotKey} inputAgeMs=${inputAgeMs} epoch=${guardSince}; eligible stream opened after external import`);
           }
         }
         return stream;
