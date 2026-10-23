@@ -131,6 +131,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
   const [variableCatalog, setVariableCatalog] = useState<WolfVariableCatalog | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
+  // Read-only validation for a user-supplied, known WOLF variable address.
+  const [directAddressText, setDirectAddressText] = useState("0x078e5588");
+  const [directAddressType, setDirectAddressType] = useState<DebugScanType>("i32");
+  const [directMemoryValue, setDirectMemoryValue] = useState<number | null>(null);
+  const [directMemoryReadOffset, setDirectMemoryReadOffset] = useState<number | null>(null);
+  const [directMemoryReadAt, setDirectMemoryReadAt] = useState("");
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -270,6 +276,33 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     if (raw.trim() === "" || !Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label}必须是非负整数；可用十进制或 0x 十六进制。`);
     return parsed;
   };
+  const readDirectMemoryAddress = async () => {
+    let offset: number;
+    try {
+      offset = readAddressInput(directAddressText, "内存地址") as number;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    setBusy("正在读取指定 WASM 内存地址…"); setError(""); setNotice("");
+    try {
+      const response = await request("memory-read", { scanType: directAddressType, offset });
+      if (typeof response.memoryValue !== "number" || !Number.isFinite(response.memoryValue)) {
+        throw new Error("运行时未返回有效数值。请确认地址、数据类型和游戏实例。");
+      }
+      setDirectMemoryValue(response.memoryValue);
+      setDirectMemoryReadOffset(offset);
+      setDirectMemoryReadAt(new Date().toLocaleTimeString());
+      setNotice(`只读成功：0x${offset.toString(16).toUpperCase()}（${directAddressType}）= ${response.memoryValue}`);
+    } catch (cause) {
+      setDirectMemoryValue(null);
+      setDirectMemoryReadOffset(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const applyScanResponse = (response: DebugResponse) => {
     if (!response.scan) throw new Error("运行时没有返回扫描结果。");
     setScanSummary(response.scan); setScanResults(response.scan.results || []); setRowValues({});
@@ -503,6 +536,37 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>已知地址直接读取（只读）</div>
+              <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
+                用于验证已知变量地址。默认填入提供的 HP 地址 0x078e5588；此区域只读，不会修改或锁定内存。
+              </div>
+              <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
+                WASM 字节偏移（十进制或 0x 十六进制）
+                <input value={directAddressText} inputMode="text" spellCheck={false}
+                  onChange={(event) => { setDirectAddressText(event.target.value); setDirectMemoryValue(null); setDirectMemoryReadOffset(null); }}
+                  placeholder="0x078e5588" style={inputStyle} />
+              </label>
+              <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 8 }}>
+                读取类型
+                <select value={directAddressType} onChange={(event) => { setDirectAddressType(event.target.value as DebugScanType); setDirectMemoryValue(null); }} style={inputStyle}>
+                  <option value="i32">Int32（有符号整数）</option><option value="u32">UInt32（无符号整数）</option>
+                  <option value="i16">Int16</option><option value="u16">UInt16</option><option value="i8">Int8</option><option value="u8">UInt8</option>
+                  <option value="f32">Float32</option><option value="f64">Float64</option>
+                </select>
+              </label>
+              <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable}
+                onClick={() => void readDirectMemoryAddress()} style={{ ...buttonStyle, width: "100%", marginTop: 10 }}>
+                {busy.includes("读取指定 WASM 内存地址") ? "读取中…" : "读取该地址（不写入）"}
+              </button>
+              {directMemoryValue !== null && directMemoryReadOffset !== null ? (
+                <div style={{ marginTop: 10, borderRadius: 9, border: "1px solid #354258", padding: 10, overflowWrap: "anywhere" }}>
+                  <div style={subtleStyle}>最近一次读取 · {directMemoryReadAt} · {directAddressType}</div>
+                  <div style={{ marginTop: 5, fontSize: 18, fontWeight: 750 }}>{String(directMemoryValue)}</div>
+                  <code style={{ fontSize: 12, color: "#9fc6ff" }}>0x{directMemoryReadOffset.toString(16).toUpperCase().padStart(8, "0")}</code>
+                </div>
+              ) : null}
+            </div>
             <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>WASM 内存扫描与修改</div>
               <div style={{ ...subtleStyle, marginTop: 5 }}>输入游戏中显示的数值进行首次扫描；回到游戏改变数值，再按变化条件复筛。地址是当前游戏实例内的字节偏移，重启游戏后通常需要重新扫描。</div>
