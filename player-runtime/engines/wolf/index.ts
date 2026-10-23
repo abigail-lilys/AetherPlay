@@ -518,6 +518,10 @@ function installAssetLoader(assets: WolfAsset[]) {
   window.addEventListener("touchstart", trackExternalSaveUserInput, true);
   window.addEventListener("mousedown", trackExternalSaveUserInput, true);
   window.addEventListener("keydown", trackExternalSaveUserInput, true);
+  // Unlinking a tombstoned cache file during IDBFS sync can make syncfs fail with ENOENT.
+  // Queue virtual deletions until every observed save-mount sync callback has settled.
+  let externalSaveSyncsInFlight = 0;
+  const deferredExternalSaveDeletePaths = new Set<string>();
   let writingExternalSaveIntoVirtualFs = false;
   let suppressExternalSaveReconcile = false;
 
@@ -571,14 +575,65 @@ function installAssetLoader(assets: WolfAsset[]) {
     for (const path of saveVirtualPaths(relativePath)) checkedExternalSavePaths.add(path.toLowerCase());
   }
 
+  function flushDeferredExternalSaveDeletes(): void {
+    if (externalSaveSyncsInFlight > 0 || deferredExternalSaveDeletePaths.size === 0) return;
+    const fs = FS as unknown as {
+      analyzePath?: (path: string) => { exists: boolean };
+      unlink?: (path: string) => unknown;
+    };
+    if (!fs.analyzePath || !fs.unlink) return;
+
+    const queued = [...deferredExternalSaveDeletePaths];
+    deferredExternalSaveDeletePaths.clear();
+    let removed = 0;
+    let failed = 0;
+    for (const path of queued) {
+      // A real post-deletion FS.write may have released this slot while syncfs was active.
+      // In that case, do not let an older queued cleanup delete the new game save.
+      const slotKey = saveSlotKey(path);
+      if (slotKey && !externallyDeletedSaveSlots.has(slotKey)) continue;
+      try {
+        if (fs.analyzePath(path).exists) {
+          fs.unlink(path);
+          removed += 1;
+        }
+      } catch (error) {
+        failed += 1;
+        deferredExternalSaveDeletePaths.add(path);
+        console.warn(`AetherPlay: deferred stale-save cleanup failed ${path}`, error);
+      }
+    }
+    reportWriteback(
+      "EXTERNAL_SAVE_DELETE_DEFERRED_FLUSHED",
+      "/data0",
+      `queuedPaths=${queued.length} removed=${removed} failed=${failed}`,
+    );
+  }
+
   function removeCachedExternalSave(relativePath: string): number {
     const fs = FS as unknown as {
       analyzePath?: (path: string) => { exists: boolean };
       unlink?: (path: string) => unknown;
     };
+    if (!fs.analyzePath || !fs.unlink) return 0;
+
+    const paths = saveVirtualPaths(relativePath);
+    if (externalSaveSyncsInFlight > 0) {
+      // Queue both mirrors, including currently absent paths: an active IDBFS sync may
+      // materialize a stale file after this function returns but before its callback.
+      for (const path of paths) deferredExternalSaveDeletePaths.add(path);
+      if (paths.length > 0) {
+        reportWriteback(
+          "EXTERNAL_SAVE_DELETE_DEFERRED",
+          relativePath,
+          `queuedPaths=${paths.length} activeSyncs=${externalSaveSyncsInFlight}`,
+        );
+      }
+      return 0;
+    }
+
     let removed = 0;
-    if (!fs.analyzePath || !fs.unlink) return removed;
-    for (const path of saveVirtualPaths(relativePath)) {
+    for (const path of paths) {
       try {
         if (fs.analyzePath(path).exists) {
           fs.unlink(path);
@@ -1122,24 +1177,45 @@ function installAssetLoader(assets: WolfAsset[]) {
         const mountpoint = normalizeMount(mountInfo?.mountpoint ?? hint);
         const populate = args[1] === true;
         const callback = args[2];
-        if (!isSaveMount(mountpoint) || populate || typeof callback !== "function") {
+        if (!isSaveMount(mountpoint) || typeof callback !== "function") {
           return (oldSync as AnyFn).apply(type, args);
         }
-        reportWriteback("IDBFS_SYNC_BEGIN", mountpoint, "populate=false");
+
+        const shouldPublish = !populate;
+        if (shouldPublish) reportWriteback("IDBFS_SYNC_BEGIN", mountpoint, "populate=false");
+        externalSaveSyncsInFlight += 1;
+        let settled = false;
+        const settleSync = (): void => {
+          if (settled) return;
+          settled = true;
+          externalSaveSyncsInFlight = Math.max(0, externalSaveSyncsInFlight - 1);
+          if (externalSaveSyncsInFlight === 0) flushDeferredExternalSaveDeletes();
+        };
+
         const nextArgs = args.slice();
         nextArgs[2] = function (error?: unknown): unknown {
           const message = error == null ? "" : error instanceof Error
             ? `${error.name}: ${error.message}`
             : (() => { try { return JSON.stringify(error); } catch { return String(error); } })();
-          if (error == null) {
-            reportWriteback("IDBFS_SYNC_DONE", mountpoint, "populate=false");
-            scheduleSavePublish();
-          } else {
-            reportWriteback("IDBFS_SYNC_ERROR", mountpoint, message);
+          // Finish tracking and clean queued tombstones only after IDBFS has stopped
+          // touching its database snapshot. Flush before scheduling any save scan.
+          settleSync();
+          if (shouldPublish) {
+            if (error == null) {
+              reportWriteback("IDBFS_SYNC_DONE", mountpoint, "populate=false");
+              scheduleSavePublish();
+            } else {
+              reportWriteback("IDBFS_SYNC_ERROR", mountpoint, message);
+            }
           }
           return (callback as (error?: unknown) => unknown)(error);
         };
-        return (oldSync as AnyFn).apply(type, nextArgs);
+        try {
+          return (oldSync as AnyFn).apply(type, nextArgs);
+        } catch (error) {
+          settleSync();
+          throw error;
+        }
       };
       reportWriteback("MOUNT_HOOKED", hint || "IDBFS", "hooked per-mount syncfs");
     };
