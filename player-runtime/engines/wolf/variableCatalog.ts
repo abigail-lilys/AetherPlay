@@ -73,13 +73,12 @@ class BinaryReader {
     const size = this.readU32();
     if (size > MAX_STRING_BYTES) throw new Error(`WOLF 字符串长度异常：${size} 字节。`);
     const bytes = this.readBytes(size);
-    let decoded = "";
-    try {
-      decoded = new TextDecoder(encoding, { fatal: false }).decode(bytes);
-    } catch {
-      decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    // Decode UTF-8 strictly: legacy Shift-JIS bytes must trigger a fallback
+    // parser instead of being silently converted into mojibake.
+    if (encoding === "utf-8") {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/\0+$/u, "");
     }
-    return decoded.replace(/\0+$/u, "");
+    return new TextDecoder("shift_jis", { fatal: false }).decode(bytes).replace(/\0+$/u, "");
   }
   readStringArray(encoding: "utf-8" | "shift_jis"): string[] {
     const count = this.readU32();
@@ -113,27 +112,27 @@ function validateCount(value: number, maximum: number, label: string): number {
   return value;
 }
 
-function parseNewProject(bytes: Uint8Array): WolfDatabaseProject {
+function parseNewProject(bytes: Uint8Array, encoding: "utf-8" | "shift_jis"): WolfDatabaseProject {
   const reader = new BinaryReader(bytes);
   const typeCount = validateCount(reader.readU32(), MAX_PROJECT_TYPES, "数据库类型");
   if (typeCount < 1) throw new Error("新版数据库 project 没有类型表。");
   const types: WolfDatabaseProjectType[] = [];
   for (let index = 0; index < typeCount; index += 1) {
-    const name = reader.readString("utf-8");
+    const name = reader.readString(encoding);
     const propertyCount = validateCount(reader.readU32(), MAX_FIELDS, "数据库字段");
     const fields: string[] = [];
-    for (let i = 0; i < propertyCount; i += 1) fields.push(reader.readString("utf-8"));
+    for (let i = 0; i < propertyCount; i += 1) fields.push(reader.readString(encoding));
     const dataCount = validateCount(reader.readU32(), MAX_DATA_TITLES, "数据库数据名");
     const dataTitles: string[] = [];
-    for (let i = 0; i < dataCount; i += 1) dataTitles.push(reader.readString("utf-8"));
-    const memo = reader.readString("utf-8");
+    for (let i = 0; i < dataCount; i += 1) dataTitles.push(reader.readString(encoding));
+    const memo = reader.readString(encoding);
     const specialTypeCount = reader.readU32();
     if (specialTypeCount !== 100) throw new Error(`新版数据库类型 ${index} 的特殊函数表长度不是 100。`);
     reader.skip(specialTypeCount);
-    reader.readStringArray("utf-8");
+    reader.readStringArray(encoding);
     const specialStringCount = reader.readU32();
     if (specialStringCount !== propertyCount) throw new Error(`新版数据库类型 ${index} 的特殊字符串字段数量不匹配。`);
-    for (let i = 0; i < specialStringCount; i += 1) reader.readStringArray("utf-8");
+    for (let i = 0; i < specialStringCount; i += 1) reader.readStringArray(encoding);
     const specialValueCount = reader.readU32();
     if (specialValueCount !== propertyCount) throw new Error(`新版数据库类型 ${index} 的特殊数值字段数量不匹配。`);
     for (let i = 0; i < specialValueCount; i += 1) reader.readU32Array();
@@ -143,32 +142,38 @@ function parseNewProject(bytes: Uint8Array): WolfDatabaseProject {
     types.push({ index, name, fields, dataTitles, memo });
   }
   if (reader.remaining > 0 && !reader.trailingBytesAreZero()) throw new Error("新版数据库 project 存在无法识别的尾部数据。");
-  return { format: "database-project-v3", encoding: "utf-8", decrypted: false, types };
+  return { format: "database-project-v3", encoding, decrypted: false, types };
 }
 
-function parseLegacyProject(bytes: Uint8Array): WolfDatabaseProject {
+function parseLegacyProject(bytes: Uint8Array, encoding: "utf-8" | "shift_jis"): WolfDatabaseProject {
   const reader = new BinaryReader(bytes);
   const typeCount = validateCount(reader.readU32(), MAX_PROJECT_TYPES, "旧版系统数据库类型");
   if (typeCount < 1) throw new Error("旧版数据库 project 没有类型表。");
   const types: WolfDatabaseProjectType[] = [];
   for (let index = 0; index < typeCount; index += 1) {
-    const name = reader.readString("shift_jis");
+    const name = reader.readString(encoding);
     const propertyCount = validateCount(reader.readU32(), MAX_FIELDS, "旧版数据库字段");
     const fields: string[] = [];
-    for (let i = 0; i < propertyCount; i += 1) fields.push(reader.readString("shift_jis"));
+    for (let i = 0; i < propertyCount; i += 1) fields.push(reader.readString(encoding));
     const dataCount = validateCount(reader.readU32(), MAX_DATA_TITLES, "旧版数据库数据名");
     const dataTitles: string[] = [];
-    for (let i = 0; i < dataCount; i += 1) dataTitles.push(reader.readString("shift_jis"));
-    const memo = reader.readString("shift_jis");
+    for (let i = 0; i < dataCount; i += 1) dataTitles.push(reader.readString(encoding));
+    const memo = reader.readString(encoding);
     types.push({ index, name, fields, dataTitles, memo });
   }
   if (reader.remaining > 0 && !reader.trailingBytesAreZero()) throw new Error("旧版数据库 project 存在无法识别的尾部数据。");
-  return { format: "database-project-legacy", encoding: "shift_jis", decrypted: false, types };
+  return { format: "database-project-legacy", encoding, decrypted: false, types };
 }
 
 function parsePlainProject(bytes: Uint8Array): WolfDatabaseProject {
   const failures: string[] = [];
-  for (const parser of [parseNewProject, parseLegacyProject]) {
+  const attempts: Array<(input: Uint8Array) => WolfDatabaseProject> = [
+    (input) => parseNewProject(input, "utf-8"),
+    (input) => parseNewProject(input, "shift_jis"),
+    (input) => parseLegacyProject(input, "utf-8"),
+    (input) => parseLegacyProject(input, "shift_jis"),
+  ];
+  for (const parser of attempts) {
     try { return parser(bytes); }
     catch (cause) { failures.push(cause instanceof Error ? cause.message : String(cause)); }
   }
@@ -208,13 +213,13 @@ export function parseWolfDatabaseProject(input: Uint8Array): WolfDatabaseProject
   throw new Error("无法解析数据库 project：文件可能采用未支持的 WOLF 版本或加密格式。");
 }
 
-function readByteString(reader: BinaryReader): string {
-  return reader.readString("utf-8");
+function readByteString(reader: BinaryReader, encoding: "utf-8" | "shift_jis"): string {
+  return reader.readString(encoding);
 }
-function readByteStringArray(reader: BinaryReader): string[] {
+function readByteStringArray(reader: BinaryReader, encoding: "utf-8" | "shift_jis"): string[] {
   const count = validateCount(reader.readU32(), MAX_DATA_TITLES, "字符串数组");
   const values: string[] = [];
-  for (let i = 0; i < count; i += 1) values.push(readByteString(reader));
+  for (let i = 0; i < count; i += 1) values.push(readByteString(reader, encoding));
   return values;
 }
 function readU32Array(reader: BinaryReader): void { reader.readU32Array(); }
@@ -224,12 +229,12 @@ function expectByte(reader: BinaryReader, expected: number, label: string): void
   if (actual !== expected) throw new Error(`CommonEvent.dat ${label} 不匹配：0x${actual.toString(16)}。`);
 }
 
-function skipEventCommand(reader: BinaryReader): void {
+function skipEventCommand(reader: BinaryReader, encoding: "utf-8" | "shift_jis"): void {
   const paramCount = reader.readU8();
   if (paramCount > 0) reader.skip(paramCount * 4);
   reader.readU8(); // branch depth
   const stringCount = reader.readU8();
-  if (stringCount > 0) for (let i = 0; i < stringCount; i += 1) reader.readString("utf-8");
+  if (stringCount > 0) for (let i = 0; i < stringCount; i += 1) reader.readString(encoding);
   const hasRoute = reader.readU8();
   if (hasRoute === 0) return;
   // Route header: animation/move/frequency/mode plus two 8-bit flag records.
@@ -249,7 +254,7 @@ export interface WolfCommonEventVariableGroup extends WolfVariableGroup {
   commonEventId: number;
 }
 
-export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: string): WolfCommonEventVariableGroup[] {
+function parseCommonEventVariableGroupsWithEncoding(input: Uint8Array, sourcePath: string, encoding: "utf-8" | "shift_jis"): WolfCommonEventVariableGroup[] {
   const reader = new BinaryReader(input);
   const magic = [0x00, 0x57, 0x00, 0x00, 0x4f, 0x4c];
   for (const byte of magic) if (reader.readU8() !== byte) throw new Error("CommonEvent.dat 文件头不匹配。");
@@ -268,17 +273,17 @@ export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: st
     reader.readU32(); // condition value
     reader.readU8(); // number argument count
     reader.readU8(); // string argument count
-    const title = reader.readString("utf-8");
+    const title = reader.readString(encoding);
     const lineCount = validateCount(reader.readU32(), 1_000_000, "公共事件命令");
-    for (let line = 0; line < lineCount; line += 1) skipEventCommand(reader);
+    for (let line = 0; line < lineCount; line += 1) skipEventCommand(reader, encoding);
     reader.skip(5); // fixed unknown marker
-    reader.readString("utf-8"); // memo
+    reader.readString(encoding); // memo
     expectByte(reader, 0x8f, "参数分隔符");
-    readByteStringArray(reader); // argument names
+    readByteStringArray(reader, encoding); // argument names
     const modePageCount = validateCount(reader.readU32(), 100_000, "参数选项模式页");
     reader.skip(modePageCount);
     const stringPageCount = validateCount(reader.readU32(), 100_000, "参数选项字符串页");
-    for (let i = 0; i < stringPageCount; i += 1) readByteStringArray(reader);
+    for (let i = 0; i < stringPageCount; i += 1) readByteStringArray(reader, encoding);
     const valuePageCount = validateCount(reader.readU32(), 100_000, "参数选项数值页");
     for (let i = 0; i < valuePageCount; i += 1) readU32Array(reader);
     readS32Array(reader); // numeric argument defaults
@@ -286,7 +291,7 @@ export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: st
     const color = reader.readU32();
     const variables: WolfVariableEntry[] = [];
     for (let index = 0; index < 100; index += 1) {
-      const name = reader.readString("utf-8").trim();
+      const name = reader.readString(encoding).trim();
       if (!name) continue; // Unnamed CSelf slots are represented by the generic template group.
       const valueType: WolfVariableValueType = index >= 5 && index <= 9 ? "string" : "number";
       if (namedCount < MAX_NAMED_COMMON_VARIABLES) {
@@ -300,7 +305,7 @@ export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: st
     expectByte(reader, 0x91, "公共事件自定义变量分隔符");
     reader.skip(5);
     expectByte(reader, 0x92, "返回值分隔符");
-    reader.readString("utf-8"); // return name
+    reader.readString(encoding); // return name
     reader.readU32(); // return value id
     expectByte(reader, 0x92, "公共事件结尾分隔符");
     if (variables.length > 0) {
@@ -316,6 +321,19 @@ export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: st
   const footer = reader.readU8();
   if (footer !== 0x8f && footer !== 0x90 && footer !== 0x91) throw new Error("CommonEvent.dat 结尾标记不匹配。");
   return groups;
+}
+
+
+export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: string): WolfCommonEventVariableGroup[] {
+  const failures: string[] = [];
+  for (const encoding of ["utf-8", "shift_jis"] as const) {
+    try {
+      return parseCommonEventVariableGroupsWithEncoding(input, sourcePath, encoding);
+    } catch (cause) {
+      failures.push(`${encoding}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+  throw new Error(`CommonEvent.dat UTF-8 / Shift-JIS 解析均失败：${failures.join(" | ")}`);
 }
 
 const SYSTEM_VARIABLE_TYPE_MAP: Record<number, { id: string; title: string; valueType: WolfVariableValueType; description: string }> = {
