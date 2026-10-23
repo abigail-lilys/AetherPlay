@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWasmMemoryScanner } from "./memoryScanner";
+
 describe("WASM memory scanner", () => {
   afterEach(() => { vi.useRealTimers(); });
   function fixture() {
     const buffer = new ArrayBuffer(128), data = new DataView(buffer);
-    data.setInt32(0, 100, true); data.setInt32(4, 100, true); data.setInt32(8, 250, true); data.setFloat32(16, 12.5, true);
-    return { data, scanner: createWasmMemoryScanner(() => buffer) };
+    data.setInt32(0, 100, true); data.setInt32(4, 100, true); data.setInt32(8, 250, true);
+    data.setFloat32(16, 12.5, true);
+    return { buffer, data, scanner: createWasmMemoryScanner(() => buffer) };
   }
   it("finds aligned exact values and returns byte offsets", async () => {
     const { scanner } = fixture(), result = await scanner.firstScan("i32", 100, true);
@@ -15,11 +17,32 @@ describe("WASM memory scanner", () => {
     const { data, scanner } = fixture(); await scanner.firstScan("i32", 100, true); data.setInt32(4, 125, true);
     const result = await scanner.nextScan("changed"); expect(result.count).toBe(1); expect(result.results[0]).toEqual({ offset: 4, value: 125 });
   });
+  it("supports numeric recan filters independently of the initial value", async () => {
+    const { scanner } = fixture();
+    await scanner.firstUnknownScan("i32", true, 0, 12);
+    expect((await scanner.nextScan("greater", 200)).results.map((x) => x.offset)).toEqual([8]);
+    await scanner.firstUnknownScan("i32", true, 0, 12);
+    expect((await scanner.nextScan("not-equal", 100)).results.map((x) => x.offset)).toEqual([8]);
+    await scanner.firstUnknownScan("i32", true, 0, 12);
+    expect((await scanner.nextScan("between", 90, 110)).results.map((x) => x.offset)).toEqual([0, 4]);
+  });
+  it("takes an unknown-value snapshot and finds changes without knowing the first value", async () => {
+    const { data, scanner } = fixture(), baseline = await scanner.firstUnknownScan("i32", true, 0, 32);
+    expect(baseline.unknownBaselinePending).toBe(true); expect(baseline.scannedBytes).toBe(32);
+    data.setInt32(4, 101, true);
+    const result = await scanner.nextScan("changed");
+    expect(result.unknownBaselinePending).toBe(false); expect(result.results.map((x) => x.offset)).toEqual([4]); expect(result.results[0].value).toBe(101);
+  });
+  it("supports bounded unknown-value scan regions", async () => {
+    const { data, scanner } = fixture(), baseline = await scanner.firstUnknownScan("i32", true, 8, 32);
+    expect(baseline.scanStartOffset).toBe(8); expect(baseline.scanEndOffset).toBe(32);
+    data.setInt32(8, 251, true);
+    expect((await scanner.nextScan("increased")).results.map((x) => x.offset)).toEqual([8]);
+  });
   it("paginates candidate addresses", async () => {
     const buffer = new ArrayBuffer(1200), data = new DataView(buffer);
     for (let offset = 0; offset < buffer.byteLength; offset += 4) data.setInt32(offset, 7, true);
-    const scanner = createWasmMemoryScanner(() => buffer);
-    const first = await scanner.firstScan("i32", 7);
+    const scanner = createWasmMemoryScanner(() => buffer), first = await scanner.firstScan("i32", 7);
     expect(first.count).toBe(300); expect(first.pageCount).toBe(2); expect(first.results).toHaveLength(200);
     const second = scanner.getPage(1); expect(second.page).toBe(1); expect(second.results).toHaveLength(100); expect(second.results[0].offset).toBe(800);
   });

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 
-type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
 type DebugTab = "overview" | "files" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
-type DebugScanFilter = "changed" | "unchanged" | "increased" | "decreased" | "equal";
+type DebugScanFilter = "changed" | "unchanged" | "increased" | "decreased" | "equal" | "not-equal" | "greater" | "less" | "between";
+type DebugScanMode = "exact" | "unknown";
 interface DebugScanResult { offset: number; value: number }
-interface DebugScanSummary { scanType: DebugScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; results: DebugScanResult[] }
+interface DebugScanSummary { scanType: DebugScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; results: DebugScanResult[]; unknownBaselinePending: boolean; scanStartOffset: number; scanEndOffset: number }
 interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
 
 interface DebugEntry {
@@ -53,7 +54,7 @@ interface DebugResponse {
   memoryValue?: number;
   frozenCount?: number;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanFilter?: DebugScanFilter; page?: number; aligned?: boolean; offset?: number; value?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -109,7 +110,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [scanType, setScanType] = useState<DebugScanType>("i32");
+  const [scanMode, setScanMode] = useState<DebugScanMode>("exact");
   const [scanValue, setScanValue] = useState("100");
+  const [refineValue, setRefineValue] = useState("100");
+  const [refineValue2, setRefineValue2] = useState("200");
+  const [unknownStartText, setUnknownStartText] = useState("0");
+  const [unknownEndText, setUnknownEndText] = useState("");
   const [scanFilter, setScanFilter] = useState<DebugScanFilter>("changed");
   const [alignedScan, setAlignedScan] = useState(true);
   const [scanSummary, setScanSummary] = useState<DebugScanSummary | null>(null);
@@ -126,7 +132,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-next" ? 120000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -243,22 +249,39 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
-  const readScanValue = () => {
-    const parsed = Number(scanValue);
-    if (scanValue.trim() === "" || !Number.isFinite(parsed)) throw new Error("请输入有效数值。");
+  const readNumericInput = (raw: string, label: string) => {
+    const parsed = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(parsed)) throw new Error(`${label}必须是有效数值。`);
+    return parsed;
+  };
+  const readScanValue = () => readNumericInput(scanValue, "首次搜索值");
+  const readAddressInput = (raw: string, label: string, allowEmpty = false): number | undefined => {
+    if (allowEmpty && raw.trim() === "") return undefined;
+    const parsed = Number(raw.trim());
+    if (raw.trim() === "" || !Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label}必须是非负整数；可用十进制或 0x 十六进制。`);
     return parsed;
   };
   const applyScanResponse = (response: DebugResponse) => {
     if (!response.scan) throw new Error("运行时没有返回扫描结果。");
     setScanSummary(response.scan); setScanResults(response.scan.results || []); setRowValues({});
-    setScanType(response.scan.scanType); setNotice(`扫描完成：${response.scan.count.toLocaleString()} 个候选地址。`);
+    setScanType(response.scan.scanType);
+    setNotice(response.scan.unknownBaselinePending
+      ? `未知初始值快照已记录（${formatBytes(response.scan.scannedBytes)}）。回到游戏操作后，可使用变化条件复筛。`
+      : `扫描完成：${response.scan.count.toLocaleString()} 个候选地址。`);
   };
   const runFirstScan = async () => {
-    let value: number;
-    try { value = readScanValue(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
-    setBusy("正在分块扫描 WASM 内存…"); setError(""); setNotice("");
-    try { applyScanResponse(await request("scan-first", { scanType, scanValue: value, aligned: alignedScan })); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+    setBusy(scanMode === "unknown" ? "正在创建未知初始值快照…" : "正在分块扫描 WASM 内存…"); setError(""); setNotice("");
+    try {
+      let response: DebugResponse;
+      if (scanMode === "exact") {
+        response = await request("scan-first", { scanType, scanValue: readScanValue(), aligned: alignedScan });
+      } else {
+        const startOffset = readAddressInput(unknownStartText, "起始地址") as number;
+        const endOffset = readAddressInput(unknownEndText, "结束地址", true);
+        response = await request("scan-unknown-first", { scanType, aligned: alignedScan, scanStartOffset: startOffset, scanEndOffset: endOffset });
+      }
+      applyScanResponse(response);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
   const loadScanPage = async (page: number) => {
     if (!scanSummary || page < 0 || page >= scanSummary.pageCount || page === scanSummary.page) return;
@@ -270,12 +293,16 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
   const runNextScan = async () => {
-    let value: number | undefined;
-    if (scanFilter === "equal") {
-      try { value = readScanValue(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
+    let value: number | undefined, value2: number | undefined;
+    if (["equal", "not-equal", "greater", "less", "between"].includes(scanFilter)) {
+      try {
+        value = readNumericInput(refineValue, "复筛目标值");
+        if (scanFilter === "between") value2 = readNumericInput(refineValue2, "范围最大值");
+        if (scanFilter === "between" && value > (value2 as number)) throw new Error("范围最小值不能大于最大值。");
+      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
     }
     setBusy("正在筛选候选地址…"); setError(""); setNotice("");
-    try { applyScanResponse(await request("scan-next", { scanFilter, scanValue: value })); }
+    try { applyScanResponse(await request("scan-next", { scanFilter, scanValue: value, scanValue2: value2 })); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
   const resetScan = async () => {
@@ -387,10 +414,31 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                     <option value="i32">Int32（常见整数）</option><option value="u32">UInt32</option><option value="i16">Int16</option><option value="u16">UInt16</option><option value="i8">Int8</option><option value="u8">UInt8</option><option value="f32">Float32（小数）</option><option value="f64">Float64</option>
                   </select>
                 </label>
-                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>首次搜索的显示值
-                  <input inputMode="decimal" value={scanValue} onChange={(event) => setScanValue(event.target.value)} placeholder="例如 100" style={inputStyle}/>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>搜索模式
+                  <select value={scanMode} disabled={Boolean(scanSummary)} onChange={(event) => setScanMode(event.target.value as DebugScanMode)} style={inputStyle}>
+                    <option value="exact">已知数值（精确搜索）</option>
+                    <option value="unknown">未知初始值（快照搜索）</option>
+                  </select>
                 </label>
               </div>
+              {scanMode === "exact" ? (
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>首次搜索的显示值
+                  <input inputMode="decimal" value={scanValue} disabled={Boolean(scanSummary)} onChange={(event) => setScanValue(event.target.value)} placeholder="例如 100" style={inputStyle}/>
+                </label>
+              ) : (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ ...subtleStyle, marginBottom: 5 }}>未知值快照范围（结束地址不包含在内；留空表示扫描到内存末尾）</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>起始地址（偏移）
+                      <input value={unknownStartText} disabled={Boolean(scanSummary)} onChange={(event) => setUnknownStartText(event.target.value)} placeholder="0 或 0x0" style={inputStyle}/>
+                    </label>
+                    <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>结束地址（可空）
+                      <input value={unknownEndText} disabled={Boolean(scanSummary)} onChange={(event) => setUnknownEndText(event.target.value)} placeholder="例如 0x4000000" style={inputStyle}/>
+                    </label>
+                  </div>
+                  <div style={{ ...subtleStyle, marginTop: 5 }}>单次快照最多 128 MiB，范围可用十进制或 0x 十六进制；内存更大时请分段扫描。</div>
+                </div>
+              )}
               <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, ...subtleStyle }}><input type="checkbox" checked={alignedScan} disabled={Boolean(scanSummary)} onChange={(event) => setAlignedScan(event.target.checked)}/>仅扫描对齐地址（更快；找不到时可关闭）</label>
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                 <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void runFirstScan()} style={{ ...buttonStyle, flex: 1, background: "#245c4b", borderColor: "#397c66" }}>首次扫描</button>
@@ -399,19 +447,36 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
             </div>
             {scanSummary ? (
               <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}><div style={{ fontWeight: 700, fontSize: 14 }}>候选地址：{scanSummary.count.toLocaleString()}</div><div style={subtleStyle}>显示前 {scanResults.length} 个</div></div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}><div style={{ fontWeight: 700, fontSize: 14 }}>{scanSummary.unknownBaselinePending ? "未知初始值快照已记录" : `候选地址：${scanSummary.count.toLocaleString()}`}</div><div style={subtleStyle}>{scanSummary.unknownBaselinePending ? formatBytes(scanSummary.scannedBytes) : `显示前 ${scanResults.length} 个`}</div></div>
                 <div style={{ ...subtleStyle, marginTop: 4 }}>类型 {scanSummary.scanType} · 已扫描 {formatBytes(scanSummary.scannedBytes)} · {scanSummary.aligned ? "对齐扫描" : "逐字节扫描"}</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
-                  <button type="button" disabled={Boolean(busy) || scanSummary.page <= 0} onClick={() => void loadScanPage(scanSummary.page - 1)} style={buttonStyle}>上一页</button>
-                  <span style={subtleStyle}>第 {scanSummary.page + 1} / {scanSummary.pageCount} 页，每页最多 200 项</span>
-                  <button type="button" disabled={Boolean(busy) || scanSummary.page + 1 >= scanSummary.pageCount} onClick={() => void loadScanPage(scanSummary.page + 1)} style={buttonStyle}>下一页</button>
-                </div>
-                {scanSummary.truncated ? <div style={{ color: "#ffd28a", fontSize: 12, marginTop: 7 }}>匹配数量超过 50,000 个，当前只保留前 50,000 个候选；建议缩小数值范围后重新扫描。</div> : null}
+                {!scanSummary.unknownBaselinePending ? (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
+                    <button type="button" disabled={Boolean(busy) || scanSummary.page <= 0} onClick={() => void loadScanPage(scanSummary.page - 1)} style={buttonStyle}>上一页</button>
+                    <span style={subtleStyle}>第 {scanSummary.page + 1} / {scanSummary.pageCount} 页，每页最多 200 项</span>
+                    <button type="button" disabled={Boolean(busy) || scanSummary.page + 1 >= scanSummary.pageCount} onClick={() => void loadScanPage(scanSummary.page + 1)} style={buttonStyle}>下一页</button>
+                  </div>
+                ) : null}
+                {scanSummary.truncated ? <div style={{ color: "#ffd28a", fontSize: 12, marginTop: 7 }}>匹配数量超过 50,000 个，当前保留了分布于内存地址范围的 50,000 个抽样候选；建议继续筛选或缩小扫描范围。</div> : null}
                 <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, marginTop: 12 }}>
-                  <select value={scanFilter} onChange={(event) => setScanFilter(event.target.value as DebugScanFilter)} style={inputStyle}><option value="changed">已变化</option><option value="unchanged">未变化</option><option value="increased">数值增大</option><option value="decreased">数值减小</option><option value="equal">等于输入值</option></select>
+                  <select value={scanFilter} onChange={(event) => setScanFilter(event.target.value as DebugScanFilter)} style={inputStyle}>
+                    <option value="changed">已变化（与上次不同）</option><option value="unchanged">未变化（与上次相同）</option>
+                    <option value="increased">比上次增大</option><option value="decreased">比上次减小</option>
+                    <option value="equal">当前值等于输入值</option><option value="not-equal">当前值不等于输入值</option>
+                    <option value="greater">当前值大于输入值</option><option value="less">当前值小于输入值</option><option value="between">当前值介于两个值之间</option>
+                  </select>
                   <button type="button" disabled={Boolean(busy)} onClick={() => void runNextScan()} style={buttonStyle}>再次筛选</button>
                 </div>
-                <div style={{ ...subtleStyle, marginTop: 6 }}>选择变化条件后，回到游戏做一次会改变目标数值的操作，再回来复筛。</div>
+                {["equal", "not-equal", "greater", "less", "between"].includes(scanFilter) ? (
+                  <div style={{ display: "grid", gridTemplateColumns: scanFilter === "between" ? "1fr 1fr" : "1fr", gap: 8, marginTop: 8 }}>
+                    <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>复筛目标值（独立于首次搜索）
+                      <input inputMode="decimal" value={refineValue} onChange={(event) => setRefineValue(event.target.value)} placeholder="例如 100" style={inputStyle}/>
+                    </label>
+                    {scanFilter === "between" ? <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>范围最大值
+                      <input inputMode="decimal" value={refineValue2} onChange={(event) => setRefineValue2(event.target.value)} placeholder="例如 200" style={inputStyle}/>
+                    </label> : null}
+                  </div>
+                ) : null}
+                <div style={{ ...subtleStyle, marginTop: 6 }}>{scanSummary.unknownBaselinePending ? "快照已保存。回到游戏进行一次操作，再回来按变化筛选；若值不易变化，可用已知目标值的等于/大于/小于/范围筛选。" : "变化筛选比较当前候选值与上次扫描时的值；数值条件使用上方独立输入框，不会覆盖首次搜索值。"}</div>
               </div>
             ) : null}
             {scanSummary && scanResults.length > 0 ? (
@@ -429,7 +494,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                 })}
               </div>
             ) : null}
-            {scanSummary && scanResults.length === 0 ? <div style={{ ...subtleStyle, padding: 12, border: "1px dashed #45536a", borderRadius: 10 }}>没有匹配地址。请确认输入类型和值；也可以关闭对齐扫描后重试。</div> : null}
+            {scanSummary && !scanSummary.unknownBaselinePending && scanResults.length === 0 ? <div style={{ ...subtleStyle, padding: 12, border: "1px dashed #45536a", borderRadius: 10 }}>没有匹配地址。请确认数值类型/筛选条件；也可以重置后关闭对齐扫描再试。</div> : null}
             <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 12 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}><div style={{ fontSize: 14, fontWeight: 700 }}>已锁定数值（{frozenResults.length}）</div><button type="button" disabled={Boolean(busy) || frozenResults.length === 0} onClick={() => void clearFreezes()} style={buttonStyle}>全部解除</button></div>
               {frozenResults.length === 0 ? <div style={{ ...subtleStyle, marginTop: 7 }}>锁定后，运行时每 100 ms 尝试写回目标值。关闭调试面板不会自动解除锁定；可在这里解除或重启游戏。</div> : null}

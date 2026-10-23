@@ -54,7 +54,10 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  command: "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  scanStartOffset?: number;
+  scanEndOffset?: number;
+  scanValue2?: number;
   path?: string;
   format?: "text" | "hex";
   content?: string;
@@ -80,7 +83,7 @@ type AetherDebugResponse = {
   truncated?: boolean;
   file?: { path: string; size: number; format: "text" | "hex"; content: string };
   backupPath?: string;
-  scan?: { scanType: WasmScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; results: Array<{ offset: number; value: number }> };
+  scan?: { scanType: WasmScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; unknownBaselinePending: boolean; scanStartOffset: number; scanEndOffset: number; results: Array<{ offset: number; value: number }> };
   memoryValue?: number;
   frozenCount?: number;
 };
@@ -319,7 +322,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
+  if (!command || (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
   try {
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -364,8 +367,12 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       const scan = await aetherDebugScanner.firstScan(message.scanType as WasmScanType, Number(message.scanValue), message.aligned !== false);
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
     }
+    if (command === "scan-unknown-first") {
+      const scan = await aetherDebugScanner.firstUnknownScan(message.scanType as WasmScanType, message.aligned !== false, message.scanStartOffset === undefined ? 0 : Number(message.scanStartOffset), message.scanEndOffset === undefined ? undefined : Number(message.scanEndOffset));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
+    }
     if (command === "scan-next") {
-      const scan = await aetherDebugScanner.nextScan(message.scanFilter as WasmScanFilter, message.scanValue === undefined ? undefined : Number(message.scanValue));
+      const scan = await aetherDebugScanner.nextScan(message.scanFilter as WasmScanFilter, message.scanValue === undefined ? undefined : Number(message.scanValue), message.scanValue2 === undefined ? undefined : Number(message.scanValue2));
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, scan }); return;
     }
     if (command === "scan-page") {
