@@ -3,6 +3,48 @@ import type { CSSProperties } from "react";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 
+export interface WolfVariableProbeTarget {
+  id: string;
+  name: string;
+  displayName: string;
+  index: number;
+  scope?: string;
+  groupId: string;
+  groupTitle: string;
+  valueType: "number" | "string";
+}
+
+interface ProbeScanSummary {
+  scanType: string;
+  count: number;
+  scannedBytes: number;
+  truncated: boolean;
+  page: number;
+  pageCount: number;
+  unknownBaselinePending: boolean;
+  scanStartOffset: number;
+  scanEndOffset: number;
+}
+
+interface ProbeScanResult {
+  offset: number;
+  value: number;
+}
+
+interface SavedProbeSet {
+  key: string;
+  id: string;
+  label: string;
+  index: number;
+  groupId: string;
+  groupTitle: string;
+  count: number;
+  pageCount: number;
+  pages: number[];
+  offsets: number[];
+  truncated: boolean;
+}
+
 interface WolfVariableCatalogViewProps {
   catalog: WolfVariableCatalog | null;
   loading: boolean;
@@ -11,6 +53,14 @@ interface WolfVariableCatalogViewProps {
   hpChainBusy: boolean;
   onRefreshHpChain: () => void;
   onWriteHpChain: (value: string) => void;
+  probeTarget: WolfVariableProbeTarget | null;
+  probeSummary: ProbeScanSummary | null;
+  probeResults: ProbeScanResult[];
+  onStartVariableProbe: (target: WolfVariableProbeTarget) => void;
+  onFilterVariableChanges: () => void;
+  onMatchVariableCurrentValue: (value: string) => void;
+  onLoadProbePage: (page: number) => void;
+  onExportProbePage: () => void;
 }
 
 const cardStyle: CSSProperties = {
@@ -32,10 +82,15 @@ function formatAddress(value: number): string {
 
 export function WolfVariableCatalogView({
   catalog, loading, onLoad, hpChain, hpChainBusy, onRefreshHpChain, onWriteHpChain,
+  probeTarget, probeSummary, probeResults,
+  onStartVariableProbe, onFilterVariableChanges,
+  onMatchVariableCurrentValue, onLoadProbePage, onExportProbePage,
 }: WolfVariableCatalogViewProps) {
   const [selectedGroupId, setSelectedGroupId] = useState("normal");
   const [query, setQuery] = useState("");
   const [targetHp, setTargetHp] = useState("999");
+  const [probeValue, setProbeValue] = useState("");
+  const [savedProbeSets, setSavedProbeSets] = useState<SavedProbeSet[]>([]);
   const hpTargetNumber = Number(targetHp.trim());
   const hpTargetValid = /^-?\d+$/u.test(targetHp.trim())
     && Number.isSafeInteger(hpTargetNumber)
@@ -88,6 +143,250 @@ export function WolfVariableCatalogView({
       </div>
     </div>
   );
+  const saveProbeCandidatePage = () => {
+    if (!probeTarget || !probeSummary || probeResults.length === 0) return;
+
+    const key = `${probeTarget.groupId}:${probeTarget.id}`;
+    setSavedProbeSets((old) => {
+      const current = old.find((item) => item.key === key);
+      const offsets = [...new Set([
+        ...(current?.offsets ?? []),
+        ...probeResults.map((item) => item.offset),
+      ])].slice(0, 5000);
+
+      const pages = [...new Set([
+        ...(current?.pages ?? []),
+        probeSummary.page,
+      ])].sort((a, b) => a - b);
+
+      const saved: SavedProbeSet = {
+        key,
+        id: probeTarget.id,
+        label: probeTarget.displayName,
+        index: probeTarget.index,
+        groupId: probeTarget.groupId,
+        groupTitle: probeTarget.groupTitle,
+        count: probeSummary.count,
+        pageCount: probeSummary.pageCount,
+        pages,
+        offsets,
+        truncated: probeSummary.truncated || probeSummary.count > offsets.length,
+      };
+
+      return current
+        ? old.map((item) => item.key === key ? saved : item)
+        : [...old, saved];
+    });
+  };
+
+  const strideRelations: Array<{
+    left: SavedProbeSet;
+    right: SavedProbeSet;
+    leftOffset: number;
+    rightOffset: number;
+    stride: number;
+  }> = [];
+
+  for (let i = 0; i < savedProbeSets.length; i += 1) {
+    for (let j = i + 1; j < savedProbeSets.length; j += 1) {
+      const left = savedProbeSets[i];
+      const right = savedProbeSets[j];
+
+      if (left.groupId !== right.groupId || left.index === right.index) continue;
+
+      // Hypothesis under test: adjacent numeric variable slots are 4 bytes apart.
+      const stride = (right.index - left.index) * 4;
+      const rightOffsets = new Set(right.offsets);
+
+      for (const leftOffset of left.offsets) {
+        const rightOffset = leftOffset + stride;
+        if (!rightOffsets.has(rightOffset)) continue;
+
+        strideRelations.push({ left, right, leftOffset, rightOffset, stride });
+        if (strideRelations.length >= 100) break;
+      }
+      if (strideRelations.length >= 100) break;
+    }
+    if (strideRelations.length >= 100) break;
+  }
+
+  const probePanel = (
+    <div style={{ ...cardStyle, borderColor: "#42618a" }}>
+      <div style={{ fontSize: 15, fontWeight: 750 }}>
+        普通数值变量存储定位实验
+      </div>
+      <p style={{ ...mutedStyle, lineHeight: 1.65, margin: "8px 0 10px" }}>
+        选择 V0、V1 等数值变量，在游戏中触发一次确定的变量变化，再筛选内存变化位置。首轮快照覆盖 WASM 内存前 64 MiB，以减少 Android 内存压力。
+        候选地址不等于已确认的变量地址；本实验不会自动写入这些候选位置。
+      </p>
+
+      {probeTarget ? (
+        <div style={{ border: "1px solid #354258", borderRadius: 10, padding: 10, marginBottom: 10 }}>
+          <div style={{ fontWeight: 700 }}>{probeTarget.displayName}</div>
+          <div style={{ ...mutedStyle, marginTop: 4 }}>
+            类别：{probeTarget.groupTitle} · 索引：{probeTarget.index}
+          </div>
+          {probeSummary ? (
+            <>
+              <div style={{ ...mutedStyle, marginTop: 7 }}>
+                扫描范围：0x{probeSummary.scanStartOffset.toString(16).toUpperCase().padStart(8, "0")}
+                {" – "}
+                0x{probeSummary.scanEndOffset.toString(16).toUpperCase().padStart(8, "0")}
+              </div>
+              <div style={{ ...mutedStyle, marginTop: 4 }}>
+                候选数：{probeSummary.count.toLocaleString()} ·
+                {" "}结果页：{probeSummary.page + 1}/{probeSummary.pageCount}
+                {probeSummary.truncated ? " · 候选结果已截断" : ""}
+              </div>
+              <div style={{ ...mutedStyle, marginTop: 4 }}>
+                {probeSummary.unknownBaselinePending
+                  ? "第一步完成：基线快照已保存。返回游戏执行能改变该变量的操作，再回来筛选变化。"
+                  : "基线已用于筛选。可继续改变同一变量，再筛选变化；也可用当前实际数值进一步收敛。"}
+              </div>
+            </>
+          ) : null}
+        </div>
+      ) : (
+        <div style={{ ...mutedStyle, lineHeight: 1.6, marginBottom: 10 }}>
+          尚未选择变量。请在下面的变量列表中选择一个数值变量并点击“定位试验”。
+        </div>
+      )}
+
+      <button
+        type="button"
+        disabled={loading || !probeTarget || !probeSummary}
+        onClick={onFilterVariableChanges}
+        style={{ ...buttonStyle, width: "100%" }}
+      >
+        筛选本次变化
+      </button>
+
+      <label style={{ ...mutedStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
+        该变量变化后的实际数值（Int32）
+        <input
+          type="number"
+          step="1"
+          value={probeValue}
+          onChange={(event) => setProbeValue(event.target.value)}
+          placeholder="例如游戏中当前显示的数值"
+          style={controlStyle}
+        />
+      </label>
+      <button
+        type="button"
+        disabled={
+          loading || !probeTarget || !probeSummary ||
+          probeSummary.unknownBaselinePending || probeSummary.count === 0 ||
+          probeValue.trim() === "" ||
+          !Number.isSafeInteger(Number(probeValue)) ||
+          Number(probeValue) < -2147483648 ||
+          Number(probeValue) > 2147483647
+        }
+        onClick={() => onMatchVariableCurrentValue(probeValue)}
+        style={{ ...buttonStyle, width: "100%", marginTop: 8 }}
+      >
+        按当前数值收敛候选
+      </button>
+
+      {probeSummary && probeSummary.count > 0 ? (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>当前候选位置</div>
+          {probeResults.slice(0, 30).map((item) => (
+            <div key={item.offset} style={{
+              display: "flex", justifyContent: "space-between", gap: 8,
+              padding: "7px 0", borderBottom: "1px solid #202b3a",
+              fontSize: 12,
+            }}>
+              <code style={{ color: "#9fc6ff" }}>{formatAddress(item.offset)}</code>
+              <span>当前值：{item.value}</span>
+            </div>
+          ))}
+          {probeResults.length > 30 ? (
+            <div style={{ ...mutedStyle, marginTop: 5 }}>
+              当前页共有 {probeResults.length} 项，仅展示前 30 项。
+            </div>
+          ) : null}
+
+          {probeSummary.pageCount > 1 ? (
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button
+                type="button"
+                disabled={loading || probeSummary.page <= 0}
+                onClick={() => onLoadProbePage(probeSummary.page - 1)}
+                style={{ ...buttonStyle, flex: 1 }}
+              >上一页</button>
+              <button
+                type="button"
+                disabled={loading || probeSummary.page + 1 >= probeSummary.pageCount}
+                onClick={() => onLoadProbePage(probeSummary.page + 1)}
+                style={{ ...buttonStyle, flex: 1 }}
+              >下一页</button>
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            disabled={loading}
+            onClick={saveProbeCandidatePage}
+            style={{ ...buttonStyle, width: "100%", marginTop: 10 }}
+          >
+            保存本页候选，用于跨变量比较
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={onExportProbePage}
+            style={{ ...buttonStyle, width: "100%", marginTop: 8 }}
+          >
+            导出本页定位 JSON
+          </button>
+        </div>
+      ) : null}
+
+      {savedProbeSets.length > 0 ? (
+        <div style={{ marginTop: 14, borderTop: "1px solid #354258", paddingTop: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>已保存的变量候选集</div>
+          <div style={{ ...mutedStyle, lineHeight: 1.6, marginTop: 5 }}>
+            分别对不同变量进行定位并保存结果页。比较编号差值与地址差值是否一致，可以检验它们是否可能属于同一连续数值数组。
+          </div>
+          {savedProbeSets.map((item) => (
+            <div key={item.key} style={{
+              border: "1px solid #253247", borderRadius: 8,
+              padding: 9, marginTop: 8, overflowWrap: "anywhere",
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 650 }}>{item.label}</div>
+              <div style={{ ...mutedStyle, marginTop: 4 }}>
+                候选：{item.offsets.length}/{item.count} · 已保存页：{item.pages.length}/{item.pageCount}
+                {item.truncated ? " · 不完整候选集" : ""}
+              </div>
+            </div>
+          ))}
+
+          {strideRelations.length > 0 ? (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>发现可能的固定间距关系</div>
+              {strideRelations.map((item, i) => (
+                <div key={`${item.left.key}:${item.right.key}:${item.leftOffset}:${i}`}
+                  style={{ ...mutedStyle, borderBottom: "1px solid #253247", padding: "8px 0", lineHeight: 1.6 }}>
+                  {item.left.id} {formatAddress(item.leftOffset)}
+                  {" → "}
+                  {item.right.id} {formatAddress(item.rightOffset)}
+                  {" · 地址差 "}
+                  {item.stride > 0 ? "+" : ""}
+                  {item.stride}
+                  {" bytes"}
+                </div>
+              ))}
+              <div style={{ ...mutedStyle, marginTop: 7 }}>
+                这些只是与 4 字节索引间距吻合的候选关系，还需要第三个变量或实际修改验证，不能直接认定为真实变量数组。
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+
   if (!catalog) {
     return (
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -145,6 +444,8 @@ export function WolfVariableCatalogView({
         </div>
       </div>
 
+      {probePanel}
+
       {catalog.warnings.length > 0 ? (
         <div style={{ ...cardStyle, color: "#ffd28a", fontSize: 12, lineHeight: 1.6 }}>
           {catalog.warnings.map((warning, index) => <div key={`${index}:${warning}`}>• {warning}</div>)}
@@ -166,9 +467,28 @@ export function WolfVariableCatalogView({
                   <div style={{ fontSize: 13, marginTop: 2, overflowWrap: "anywhere" }}>{item.name}</div>
                   {item.scope ? <div style={{ ...mutedStyle, marginTop: 2 }}>{item.scope}</div> : null}
                 </div>
-                <span style={{ flexShrink: 0, border: "1px solid #354258", borderRadius: 7, padding: "4px 7px", fontSize: 11, color: item.valueType === "string" ? "#d6b7ff" : "#b8f3da" }}>
-                  {item.valueType === "string" ? "字符串" : "数值"}
-                </span>
+                <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                  <span style={{ border: "1px solid #354258", borderRadius: 7, padding: "4px 7px", fontSize: 11, color: item.valueType === "string" ? "#d6b7ff" : "#b8f3da" }}>
+                    {item.valueType === "string" ? "字符串" : "数值"}
+                  </span>
+                  {selectedGroup.category === "variable" && item.valueType === "number" ? (
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={() => onStartVariableProbe({
+                        id: item.id,
+                        name: item.name,
+                        displayName: item.displayName,
+                        index: item.index,
+                        scope: item.scope,
+                        groupId: selectedGroup.id,
+                        groupTitle: selectedGroup.title,
+                        valueType: item.valueType,
+                      })}
+                      style={{ ...buttonStyle, padding: "5px 7px", fontSize: 11, whiteSpace: "nowrap" }}
+                    >定位试验</button>
+                  ) : null}
+                </div>
               </div>
             ))}
             {displayed.length === 0 ? <div style={{ ...mutedStyle, padding: 12 }}>这个类别没有匹配项。</div> : null}

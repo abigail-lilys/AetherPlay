@@ -4,7 +4,7 @@ import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
-import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
+import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
 type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
 type DebugTab = "overview" | "files" | "variables" | "memory";
@@ -146,6 +146,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [directMemoryReadOffset, setDirectMemoryReadOffset] = useState<number | null>(null);
   const [directMemoryReadAt, setDirectMemoryReadAt] = useState("");
   const [hpChain, setHpChain] = useState<WolfHpPointerChainSnapshot | null>(null);
+  const [variableProbeTarget, setVariableProbeTarget] = useState<WolfVariableProbeTarget | null>(null);
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -537,6 +538,179 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
+  const startVariableProbe = async (target: WolfVariableProbeTarget) => {
+    setError("");
+    setNotice("");
+
+    if (!capabilities?.memoryAvailable || capabilities.heapBytes <= 0) {
+      setError("当前没有可扫描的 WASM 内存，请先刷新运行时探测。");
+      return;
+    }
+
+    // 先扫描 64 MiB，控制 Android WebView 的额外内存开销。
+    // 如果没有找到候选，下一轮再扩大扫描范围。
+    let endOffset = Math.min(
+      Math.floor(capabilities.heapBytes),
+      64 * 1024 * 1024,
+    );
+    endOffset -= endOffset % 4;
+
+    if (endOffset < 4) {
+      setError("可扫描的内存范围太小。");
+      return;
+    }
+
+    setBusy(`正在为 ${target.id} 创建基线快照…`);
+
+    try {
+      await request("scan-reset");
+
+      const response = await request("scan-unknown-first", {
+        scanType: "i32",
+        aligned: true,
+        scanStartOffset: 0,
+        scanEndOffset: endOffset,
+      });
+
+      if (!response.scan) {
+        throw new Error("运行时没有返回变量定位快照。");
+      }
+
+      setVariableProbeTarget(target);
+      setScanMode("unknown");
+      setScanType("i32");
+      setScanSummary(response.scan);
+      setScanResults(response.scan.results || []);
+      setRowValues({});
+
+      setNotice(
+        `${target.id} 基线快照已保存，范围 0x00000000–0x${endOffset.toString(16).toUpperCase()}。现在回到游戏执行能改变该变量的操作。`
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const filterVariableChanges = async () => {
+    if (!variableProbeTarget || !scanSummary) {
+      setError("请先选择一个数值变量并创建基线快照。");
+      return;
+    }
+
+    setBusy("正在筛选变量变化位置…");
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await request("scan-next", {
+        scanFilter: "changed",
+      });
+
+      if (!response.scan) {
+        throw new Error("运行时没有返回变化筛选结果。");
+      }
+
+      applyScanResponse(response);
+
+      setNotice(
+        `${variableProbeTarget.id} 变化筛选完成：${response.scan.count.toLocaleString()} 个候选位置。可以继续改变变量，再重复筛选。`
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const matchVariableCurrentValue = async (raw: string) => {
+    if (!variableProbeTarget || !scanSummary) {
+      setError("请先开始变量定位实验。");
+      return;
+    }
+    if (scanSummary.unknownBaselinePending) {
+      setError("请先回到游戏改变变量，再点击“筛选本次变化”。");
+      return;
+    }
+
+    const value = Number(raw.trim());
+
+    if (
+      raw.trim() === "" ||
+      !Number.isSafeInteger(value) ||
+      value < -2147483648 ||
+      value > 2147483647
+    ) {
+      setError("请输入该变量当前实际的 Int32 数值。");
+      return;
+    }
+
+    setBusy(`正在用 ${value} 筛选候选位置…`);
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await request("scan-next", {
+        scanFilter: "equal",
+        scanValue: value,
+      });
+
+      if (!response.scan) {
+        throw new Error("运行时没有返回数值筛选结果。");
+      }
+
+      applyScanResponse(response);
+      setNotice(
+        `${variableProbeTarget.id} 数值筛选完成：剩余 ${response.scan.count.toLocaleString()} 个候选位置。`
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const exportVariableProbePage = async () => {
+    if (!variableProbeTarget || !scanSummary) {
+      setError("没有可导出的变量定位结果。");
+      return;
+    }
+
+    const report = {
+      format: "aetherplay-wolf-variable-storage-probe",
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      game: { id: gameId, title: gameTitle },
+      variable: variableProbeTarget,
+      scan: {
+        ...scanSummary,
+        // 这里只导出当前结果页；可翻页逐页保存。
+        results: scanResults,
+      },
+      notes: [
+        "这些地址是候选，不代表已经证明它们存储该变量。",
+        "后续需要比较不同变量编号的候选地址关系。",
+        "此次首次快照默认只覆盖 WASM 内存前 64 MiB。",
+      ],
+    };
+
+    const safeId = variableProbeTarget.id.replace(/[^a-z0-9_-]/giu, "_");
+    const filename = `AetherPlay-WOLF-Variable-Probe-${safeId}-${Date.now()}.json`;
+
+    setBusy("正在导出变量定位结果…");
+    setError("");
+
+    try {
+      await saveAndroidTextFile(filename, JSON.stringify(report, null, 2));
+      setNotice(`已请求保存变量定位报告：${filename}`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const tabButton = (value: DebugTab, label: string) => (
     <button key={value} type="button" onClick={() => { setTab(value); setError(""); }}
       style={{ ...buttonStyle, flex: 1, background: tab === value ? "#28528a" : "#182335", borderColor: tab === value ? "#5e9ce9" : "#354258" }}>
@@ -603,7 +777,23 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         ) : null}
 
         {tab === "variables" ? (
-          <WolfVariableCatalogView catalog={variableCatalog} loading={Boolean(busy)} onLoad={() => void loadVariableCatalog()} hpChain={hpChain} hpChainBusy={Boolean(busy)} onRefreshHpChain={() => void refreshHpChain()} onWriteHpChain={(value) => void writeHpChain(value)} />
+          <WolfVariableCatalogView
+            catalog={variableCatalog}
+            loading={Boolean(busy)}
+            onLoad={() => void loadVariableCatalog()}
+            hpChain={hpChain}
+            hpChainBusy={Boolean(busy)}
+            onRefreshHpChain={() => void refreshHpChain()}
+            onWriteHpChain={(value) => void writeHpChain(value)}
+            probeTarget={variableProbeTarget}
+            probeSummary={scanSummary}
+            probeResults={scanResults}
+            onStartVariableProbe={(target) => void startVariableProbe(target)}
+            onFilterVariableChanges={() => void filterVariableChanges()}
+            onMatchVariableCurrentValue={(value) => void matchVariableCurrentValue(value)}
+            onLoadProbePage={(page) => void loadScanPage(page)}
+            onExportProbePage={() => void exportVariableProbePage()}
+          />
         ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
