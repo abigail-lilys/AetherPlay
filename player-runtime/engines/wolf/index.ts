@@ -479,6 +479,19 @@ function installAssetLoader(assets: WolfAsset[]) {
 
   // Android external saves are authoritative when an SAF root is registered.
   const checkedExternalSavePaths = new Set<string>();
+  // AETHER_EXTERNAL_WOLF_STALE_CACHE_BLOCK_V1: remember old virtual payloads before importing newer SAF bytes.
+  const staleExternalSaveFingerprints = new Map<string, Set<string>>();
+  const authoritativeExternalSaveFingerprints = new Map<string, string>();
+  const reportedStaleExternalSaveBlocks = new Set<string>();
+  function fingerprintExternalSaveBytes(bytes: Uint8Array): string {
+    let left = 0x811c9dc5;
+    let right = 0x9e3779b9;
+    for (let index = 0; index < bytes.length; index += 1) {
+      left = Math.imul(left ^ bytes[index], 0x01000193) >>> 0;
+      right = Math.imul(right ^ (bytes[index] + index), 0x85ebca6b) >>> 0;
+    }
+    return `${bytes.length}:${left.toString(16)}:${right.toString(16)}`;
+  }
   // A 404 is a deletion signal, not permission to restore an IDBFS copy.
   const externallyDeletedSaveSlots = new Set<string>();
   const externalSaveDeletedAt = new Map<string, number>();
@@ -626,11 +639,38 @@ function installAssetLoader(assets: WolfAsset[]) {
         reportWriteback("EXTERNAL_SAVE_INVALID", relativePath, `bytes=${bytes.byteLength}`);
         return false;
       }
+      const slotKey = relativePath.split("/").pop()?.toLowerCase();
+      const externalFingerprint = fingerprintExternalSaveBytes(bytes);
+      const paths = saveVirtualPaths(relativePath);
+      if (!paths.length) paths.push(virtualPath);
+      const inspectFs = FS as unknown as {
+        analyzePath?: (path: string) => { exists: boolean };
+        readFile?: (path: string) => Uint8Array | string;
+      };
+      const staleFingerprints = new Set<string>(
+        slotKey ? (staleExternalSaveFingerprints.get(slotKey) ?? []) : [],
+      );
+      for (const path of paths) {
+        try {
+          if (!inspectFs.analyzePath || !inspectFs.readFile || !inspectFs.analyzePath(path).exists) continue;
+          const previous = inspectFs.readFile(path);
+          const previousBytes = previous instanceof Uint8Array
+            ? Uint8Array.from(previous)
+            : Uint8Array.from(previous, character => character.charCodeAt(0) & 255);
+          if (previousBytes.byteLength === 0 || previousBytes.byteLength > 16 * 1024 * 1024) continue;
+          const previousFingerprint = fingerprintExternalSaveBytes(previousBytes);
+          if (previousFingerprint !== externalFingerprint) staleFingerprints.add(previousFingerprint);
+        } catch (error) {
+          console.warn(`AetherPlay: could not fingerprint old virtual save ${path}`, error);
+        }
+      }
+      if (slotKey) {
+        staleExternalSaveFingerprints.set(slotKey, staleFingerprints);
+        authoritativeExternalSaveFingerprints.set(slotKey, externalFingerprint);
+      }
       const fs = FS as unknown as {
         writeFile: (path: string, data: Uint8Array) => unknown;
       };
-      const paths = saveVirtualPaths(relativePath);
-      if (!paths.length) paths.push(virtualPath);
       writingExternalSaveIntoVirtualFs = true;
       try {
         for (const path of paths) {
@@ -852,6 +892,19 @@ function installAssetLoader(assets: WolfAsset[]) {
                   ? Uint8Array.from(source)
                   : Uint8Array.from(source, character => character.charCodeAt(0) & 255);
                 if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) continue;
+                const externalStaleSlotKey = name.toLowerCase();
+                const scannedFingerprint = fingerprint(bytes);
+                const staleFingerprints = staleExternalSaveFingerprints.get(externalStaleSlotKey);
+                const authoritativeFingerprint = authoritativeExternalSaveFingerprints.get(externalStaleSlotKey);
+                if (staleFingerprints?.has(scannedFingerprint) && scannedFingerprint !== authoritativeFingerprint) {
+                  const reportKey = `${externalStaleSlotKey}:${scannedFingerprint}:${authoritativeFingerprint ?? "unknown"}`;
+                  if (!reportedStaleExternalSaveBlocks.has(reportKey)) {
+                    reportedStaleExternalSaveBlocks.add(reportKey);
+                    reportWriteback("EXTERNAL_SAVE_STALE_CACHE_BLOCKED", `Save/${name}`,
+                      `fingerprint=${scannedFingerprint} authoritative=${authoritativeFingerprint ?? "unknown"} source=${path}`);
+                  }
+                  continue;
+                }
                 let mtime = 0;
                 try { mtime = Number(fs.stat(path).mtime ?? 0) || 0; } catch { /* rank is fallback */ }
                 const previous = candidates.get(slotKey);
