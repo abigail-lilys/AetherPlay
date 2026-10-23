@@ -29,6 +29,7 @@ import { installWolfCompatibility } from "@/player-runtime/engines/wolf/compatib
 import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibility";
 import { createWasmMemoryScanner, type WasmScanFilter, type WasmScanType } from "@/player-runtime/engines/wolf/memoryScanner";
 import { buildWolfVariableCatalog, type WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
+import { inspectWasmRuntimeSurface, summarizeWasmExports, summarizeWasmImports, type AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 
 declare const Module: WolfRuntimeModule;
 declare const FS: {
@@ -55,7 +56,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  command: "probe" | "runtime-introspect" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -88,6 +89,7 @@ type AetherDebugResponse = {
   memoryValue?: number;
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
+  runtimeIntrospection?: AetherRuntimeIntrospection;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -110,6 +112,8 @@ let aetherDebugCapturedMemory: WebAssembly.Memory | undefined;
 let aetherDebugMemorySource = "未捕获";
 let aetherDebugWasmInstantiateCalls = 0;
 let aetherDebugWasmCaptureHookInstalled = false;
+let aetherDebugCapturedWasmExports: ReturnType<typeof summarizeWasmExports> = [];
+let aetherDebugCapturedWasmImports: string[] = [];
 
 function aetherDebugCaptureMemoryTree(
   value: unknown,
@@ -129,6 +133,7 @@ function aetherDebugCaptureMemoryTree(
 
   if (value instanceof WebAssembly.Instance) {
     const exports = value.exports as unknown as Record<string, unknown>;
+    aetherDebugCapturedWasmExports = summarizeWasmExports(exports);
     for (const key of Object.keys(exports)) {
       aetherDebugCaptureMemoryTree(
         exports[key],
@@ -177,6 +182,7 @@ function aetherDebugInstallWasmCapture(): void {
     try {
       api[method] = (...args: unknown[]): unknown => {
         aetherDebugWasmInstantiateCalls += 1;
+        aetherDebugCapturedWasmImports = summarizeWasmImports(args[1]);
         aetherDebugCaptureMemoryTree(
           args[1],
           `WebAssembly.${method}.imports`,
@@ -219,6 +225,20 @@ function aetherDebugGetMemoryBuffer(): ArrayBufferLike | undefined {
   return buffer && buffer.byteLength > 0 ? buffer : undefined;
 }
 const aetherDebugScanner = createWasmMemoryScanner(aetherDebugGetMemoryBuffer);
+
+function aetherDebugInspectRuntimeSurface(): AetherRuntimeIntrospection {
+  const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
+  const moduleMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory
+    ? module.wasmMemory
+    : undefined;
+  return inspectWasmRuntimeSurface(
+    module,
+    aetherDebugCapturedWasmExports,
+    aetherDebugCapturedWasmImports,
+    aetherDebugGetMemoryBuffer()?.byteLength ?? 0,
+    aetherDebugCapturedMemory ? aetherDebugMemorySource : (moduleMemory ? "Module.wasmMemory" : "未捕获"),
+  );
+}
 
 function aetherDebugMetadataAssetPaths(): string[] {
   const host = window as typeof window & {
@@ -378,8 +398,13 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
   try {
+    if (command === "runtime-introspect") {
+      const runtimeIntrospection = aetherDebugInspectRuntimeSurface();
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, runtimeIntrospection });
+      return;
+    }
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
       const heapCandidate = module?.HEAPU8;

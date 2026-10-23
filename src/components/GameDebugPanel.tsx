@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
+import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+type DebugCommand = "probe" | "runtime-introspect" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -56,6 +57,7 @@ interface DebugResponse {
   memoryValue?: number;
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
+  runtimeIntrospection?: AetherRuntimeIntrospection;
 }
 interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; }
 interface PendingRequest {
@@ -126,6 +128,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [rowValues, setRowValues] = useState<Record<number, string>>({});
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
   const [variableCatalog, setVariableCatalog] = useState<WolfVariableCatalog | null>(null);
+  const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -355,6 +358,21 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
 
+  const loadRuntimeIntrospection = async () => {
+    setBusy("正在检查 WOLF/WASM 运行时接口…"); setError(""); setNotice("");
+    try {
+      const response = await request("runtime-introspect");
+      if (!response.runtimeIntrospection) throw new Error("运行时没有返回接口探针数据。");
+      setRuntimeIntrospection(response.runtimeIntrospection);
+      const count = response.runtimeIntrospection.variableApiCandidates.length;
+      setNotice(count
+        ? `接口探针完成：发现 ${count} 个名称疑似与变量访问有关的函数，仍需验证其语义。`
+        : "接口探针完成：未见直接变量 API，已保存 WASM 导出信息供进一步逆向。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const loadVariableCatalog = async () => {
     setBusy("正在读取 WOLF 变量元数据…"); setError(""); setNotice("");
     try {
@@ -414,6 +432,20 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
               void request("probe").then((response) => { setCapabilities(response.capabilities ?? null); setNotice("运行时能力已刷新。"); })
                 .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
             }}>重新探测</button>
+            <button type="button" style={{ ...buttonStyle, marginTop: 8, width: "100%" }} disabled={Boolean(busy)}
+              onClick={() => void loadRuntimeIntrospection()}>
+              {busy.includes("运行时接口") ? "检查中…" : "检查实时变量访问接口"}
+            </button>
+            {runtimeIntrospection ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ ...subtleStyle, lineHeight: 1.6, marginBottom: 6 }}>
+                  这是只读探针结果，不会修改游戏内存。长按下方文本可选择并复制 JSON 发回分析。
+                </div>
+                <textarea aria-label="WOLF 运行时接口探针 JSON" readOnly rows={16}
+                  value={JSON.stringify(runtimeIntrospection, null, 2)}
+                  style={{ ...inputStyle, fontFamily: "monospace", fontSize: 11, lineHeight: 1.45, resize: "vertical" }} />
+              </div>
+            ) : null}
           </section>
         ) : null}
 
