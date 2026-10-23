@@ -56,7 +56,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -90,6 +90,7 @@ type AetherDebugResponse = {
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
   runtimeIntrospection?: AetherRuntimeIntrospection;
+  addressTrace?: AetherDebugAddressTrace;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -100,6 +101,9 @@ type AetherDebugFS = {
   writeFile(path: string, data: Uint8Array | string): unknown;
 };
 const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
+type AetherDebugAddressWord = { offset: number; hex: string; value: number; signedValue: number; floatValue: number };
+type AetherDebugAddressReference = { offset: number; offsetHex: string; pointsTo: number; pointsToHex: string; delta: number; exact: boolean; context: AetherDebugAddressWord[] };
+type AetherDebugAddressTrace = { targetOffset: number; targetHex: string; memoryBytes: number; scannedBytes: number; scannedWords: number; radiusBytes: number; exactReferenceCount: number; nearbyReferenceCount: number; referencesTruncated: boolean; references: AetherDebugAddressReference[]; targetContext: AetherDebugAddressWord[]; notes: string[] };
 
 // AetherPlay diagnostic: capture WebAssembly.Memory without relying on
 // Emscripten Module.HEAP* properties.
@@ -225,6 +229,70 @@ function aetherDebugGetMemoryBuffer(): ArrayBufferLike | undefined {
   return buffer && buffer.byteLength > 0 ? buffer : undefined;
 }
 const aetherDebugScanner = createWasmMemoryScanner(aetherDebugGetMemoryBuffer);
+
+function aetherDebugReadAddressWords(view: DataView, center: number, radius = 16): AetherDebugAddressWord[] {
+  const aligned = Math.floor(center / 4) * 4;
+  const start = Math.max(0, aligned - radius);
+  const end = Math.min(view.byteLength, aligned + radius + 4);
+  const words: AetherDebugAddressWord[] = [];
+  for (let offset = Math.ceil(start / 4) * 4; offset + 4 <= end; offset += 4) {
+    const value = view.getUint32(offset, true);
+    words.push({ offset, hex: `0x${value.toString(16).padStart(8, "0")}`, value, signedValue: view.getInt32(offset, true), floatValue: view.getFloat32(offset, true) });
+  }
+  return words;
+}
+
+async function aetherDebugTraceAddress(targetOffset: number): Promise<AetherDebugAddressTrace> {
+  if (!Number.isSafeInteger(targetOffset) || targetOffset < 0 || targetOffset > 0xffffffff) throw new Error("目标地址必须是 0 至 0xFFFFFFFF 范围内的 WASM32 字节偏移。");
+  const initialBuffer = aetherDebugGetMemoryBuffer();
+  if (!initialBuffer || initialBuffer.byteLength < 4) throw new Error("尚未取得可读的 WASM 内存。");
+  if (targetOffset + 4 > initialBuffer.byteLength) throw new Error(`目标地址超出当前 WASM 内存；当前长度 ${initialBuffer.byteLength} 字节。`);
+  const scanBytes = initialBuffer.byteLength - (initialBuffer.byteLength % 4);
+  const radiusBytes = 0x400;
+  const exactSamples: Array<{ offset: number; pointsTo: number; delta: number; exact: boolean }> = [];
+  const nearbySamples: Array<{ offset: number; pointsTo: number; delta: number; exact: boolean }> = [];
+  let exactReferenceCount = 0;
+  let nearbyReferenceCount = 0;
+  const chunkBytes = 2 * 1024 * 1024;
+  for (let chunkStart = 0; chunkStart < scanBytes; chunkStart += chunkBytes) {
+    const currentBuffer = aetherDebugGetMemoryBuffer();
+    if (!currentBuffer) throw new Error("扫描期间 WASM 内存不可访问；请重新探测。 ");
+    const view = new DataView(currentBuffer);
+    const chunkEnd = Math.min(chunkStart + chunkBytes, scanBytes, view.byteLength);
+    for (let offset = chunkStart; offset + 4 <= chunkEnd; offset += 4) {
+      const pointsTo = view.getUint32(offset, true);
+      const delta = pointsTo - targetOffset;
+      if (delta === 0) {
+        exactReferenceCount += 1;
+        if (exactSamples.length < 2000) exactSamples.push({ offset, pointsTo, delta, exact: true });
+      } else if (Math.abs(delta) <= radiusBytes) {
+        nearbyReferenceCount += 1;
+        if (nearbySamples.length < 20000) nearbySamples.push({ offset, pointsTo, delta, exact: false });
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  const view = new DataView(aetherDebugGetMemoryBuffer() ?? initialBuffer);
+  const pickedExact = exactSamples.sort((a, b) => a.offset - b.offset).slice(0, 100);
+  const pickedNearby = nearbySamples.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta) || a.offset - b.offset).slice(0, 200);
+  const references = [...pickedExact, ...pickedNearby].map((entry) => ({
+    ...entry, offsetHex: `0x${entry.offset.toString(16).padStart(8, "0")}`,
+    pointsToHex: `0x${entry.pointsTo.toString(16).padStart(8, "0")}`,
+    context: aetherDebugReadAddressWords(view, entry.offset),
+  }));
+  return {
+    targetOffset, targetHex: `0x${targetOffset.toString(16).padStart(8, "0")}`,
+    memoryBytes: view.byteLength, scannedBytes: scanBytes, scannedWords: Math.floor(scanBytes / 4), radiusBytes,
+    exactReferenceCount, nearbyReferenceCount, referencesTruncated: exactReferenceCount > pickedExact.length || nearbyReferenceCount > pickedNearby.length,
+    references, targetContext: aetherDebugReadAddressWords(view, targetOffset, 32),
+    notes: [
+      "这是只读的 32 位小端指针候选扫描，不会修改游戏内存。",
+      "精确引用表示该字恰好等于目标偏移；附近候选表示该字落在目标地址 ±0x400 范围内。",
+      "附近候选可能只是巧合或同一内存区域中的其他对象，不能单凭命中认定为 HP 所属结构。",
+      "若要跨重启自动定位，需要进一步验证引用位置是否稳定，或递归追踪指向引用位置的上层指针。",
+    ],
+  };
+}
 
 function aetherDebugInspectRuntimeSurface(): AetherRuntimeIntrospection {
   const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -398,7 +466,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
   try {
     if (command === "runtime-introspect") {
       const runtimeIntrospection = aetherDebugInspectRuntimeSurface();
@@ -469,6 +537,11 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
     if (command === "scan-reset") {
       aetherDebugScanner.resetScan();
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, frozenCount: aetherDebugScanner.frozenCount() }); return;
+    }
+    if (command === "address-trace") {
+      const addressTrace = await aetherDebugTraceAddress(Number(message.offset));
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, addressTrace });
+      return;
     }
     if (command === "memory-read") {
       const memoryValue = aetherDebugScanner.read(message.scanType as WasmScanType, Number(message.offset));

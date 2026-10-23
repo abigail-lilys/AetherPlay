@@ -5,7 +5,7 @@ import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variable
 import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -13,6 +13,9 @@ type DebugScanFilter = "changed" | "unchanged" | "increased" | "decreased" | "eq
 type DebugScanMode = "exact" | "unknown";
 interface DebugScanResult { offset: number; value: number }
 interface DebugScanSummary { scanType: DebugScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; results: DebugScanResult[]; unknownBaselinePending: boolean; scanStartOffset: number; scanEndOffset: number }
+interface DebugAddressWord { offset: number; hex: string; value: number; signedValue: number; floatValue: number }
+interface DebugAddressReference { offset: number; offsetHex: string; pointsTo: number; pointsToHex: string; delta: number; exact: boolean; context: DebugAddressWord[] }
+interface DebugAddressTrace { targetOffset: number; targetHex: string; memoryBytes: number; scannedBytes: number; scannedWords: number; radiusBytes: number; exactReferenceCount: number; nearbyReferenceCount: number; referencesTruncated: boolean; references: DebugAddressReference[]; targetContext: DebugAddressWord[]; notes: string[] }
 interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
 
 interface DebugEntry {
@@ -60,6 +63,7 @@ interface DebugResponse {
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
   runtimeIntrospection?: AetherRuntimeIntrospection;
+  addressTrace?: DebugAddressTrace;
 }
 interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; }
 interface PendingRequest {
@@ -126,6 +130,8 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [scanFilter, setScanFilter] = useState<DebugScanFilter>("changed");
   const [alignedScan, setAlignedScan] = useState(true);
   const [scanSummary, setScanSummary] = useState<DebugScanSummary | null>(null);
+  const [traceAddressText, setTraceAddressText] = useState("0x0795c0b0");
+  const [addressTrace, setAddressTrace] = useState<DebugAddressTrace | null>(null);
   const [scanResults, setScanResults] = useState<DebugScanResult[]>([]);
   const [rowValues, setRowValues] = useState<Record<number, string>>({});
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
@@ -147,7 +153,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -311,6 +317,28 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       ? `未知初始值快照已记录（${formatBytes(response.scan.scannedBytes)}）。回到游戏操作后，可使用变化条件复筛。`
       : `扫描完成：${response.scan.count.toLocaleString()} 个候选地址。`);
   };
+  const runAddressTrace = async () => {
+    setBusy("正在扫描指向 HP 地址的指针…"); setError(""); setNotice("");
+    try {
+      const offset = readAddressInput(traceAddressText, "目标地址") as number;
+      if (offset > 0xffffffff) throw new Error("WASM32 指针地址必须不超过 0xFFFFFFFF。");
+      const response = await request("address-trace", { offset });
+      if (!response.addressTrace) throw new Error("运行时没有返回地址引用分析结果。");
+      setAddressTrace(response.addressTrace);
+      setNotice(`地址分析完成：发现 ${response.addressTrace.exactReferenceCount} 个精确引用、${response.addressTrace.nearbyReferenceCount} 个附近指针候选。`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+  const exportAddressTrace = async () => {
+    if (!addressTrace) return;
+    setBusy("正在导出地址引用分析 JSON…"); setError("");
+    try {
+      const report = { format: "aetherplay-wolf-address-reference-analysis", schemaVersion: 1, exportedAt: new Date().toISOString(), game: { id: gameId, title: gameTitle }, addressTrace };
+      const filename = `AetherPlay-WOLF-Address-${addressTrace.targetHex.replace(/^0x/i, "")}.json`;
+      await saveAndroidTextFile(filename, JSON.stringify(report, null, 2));
+      setNotice(`已请求保存 ${filename}。`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+
   const runFirstScan = async () => {
     setBusy(scanMode === "unknown" ? "正在创建未知初始值快照…" : "正在分块扫描 WASM 内存…"); setError(""); setNotice("");
     try {
@@ -564,6 +592,32 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   <div style={subtleStyle}>最近一次读取 · {directMemoryReadAt} · {directAddressType}</div>
                   <div style={{ marginTop: 5, fontSize: 18, fontWeight: 750 }}>{String(directMemoryValue)}</div>
                   <code style={{ fontSize: 12, color: "#9fc6ff" }}>0x{directMemoryReadOffset.toString(16).toUpperCase().padStart(8, "0")}</code>
+                </div>
+              ) : null}
+            </div>
+            <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>已知地址引用分析</div>
+              <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.55 }}>针对会随 HP 变化的地址，扫描当前 WASM 内存中指向该地址或其附近（±0x400 字节）的 32 位指针。只读、不改值；目的是寻找可能的上层数据结构引用，帮助解决重进游戏后地址变化的问题。</div>
+              <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>HP 当前地址
+                <input value={traceAddressText} onChange={(event) => setTraceAddressText(event.target.value)} placeholder="例如 0x0795c0b0" style={inputStyle} />
+              </label>
+              <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void runAddressTrace()} style={{ ...buttonStyle, width: "100%", marginTop: 9 }}>分析地址引用（只读）</button>
+              {addressTrace ? (
+                <div style={{ marginTop: 12 }}>
+                  {infoRow("目标地址", addressTrace.targetHex)}
+                  {infoRow("扫描范围", formatBytes(addressTrace.scannedBytes))}
+                  {infoRow("精确指向该地址", addressTrace.exactReferenceCount.toLocaleString())}
+                  {infoRow("±0x400 内指针候选", addressTrace.nearbyReferenceCount.toLocaleString())}
+                  <div style={{ ...subtleStyle, lineHeight: 1.55, marginTop: 8 }}>以下是指针所在位置及其周围的 32 位字。附近指针只代表候选，不自动证明它属于 HP 结构。</div>
+                  {addressTrace.references.slice(0, 30).map((item) => (
+                    <div key={`${item.offset}:${item.pointsTo}`} style={{ marginTop: 8, padding: 9, border: "1px solid #253247", borderRadius: 9 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}><code style={{ color: item.exact ? "#b8f3da" : "#9fc6ff" }}>{item.offsetHex}</code><span>{item.exact ? "精确引用" : `偏移 ${item.delta >= 0 ? "+" : ""}${item.delta}`}</span></div>
+                      <div style={{ ...subtleStyle, marginTop: 4 }}>指向 {item.pointsToHex}</div>
+                      <div style={{ ...subtleStyle, overflowWrap: "anywhere", marginTop: 4 }}>邻近字：{item.context.map((word) => `${word.offset.toString(16)}=${word.hex}`).join(" · ")}</div>
+                    </div>
+                  ))}
+                  {addressTrace.referencesTruncated ? <div style={{ ...subtleStyle, marginTop: 8 }}>引用较多，页面仅显示前 30 项；JSON 文件包含最多 300 个筛选后的引用样本。</div> : null}
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void exportAddressTrace()} style={{ ...buttonStyle, width: "100%", marginTop: 10 }}>导出地址分析 JSON</button>
                 </div>
               ) : null}
             </div>
