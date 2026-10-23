@@ -479,10 +479,17 @@ function installAssetLoader(assets: WolfAsset[]) {
 
   // Android external saves are authoritative when an SAF root is registered.
   const checkedExternalSavePaths = new Set<string>();
+  // AETHER_EXTERNAL_WOLF_EXTERNAL_IMPORT_AUTHORITY_V2: clear stale writeback intent when SAF replaces a slot.
+  let afterExternalSaveImport: ((relativePath: string) => void) | undefined;
   // AETHER_EXTERNAL_WOLF_STALE_CACHE_BLOCK_V1: remember old virtual payloads before importing newer SAF bytes.
   const staleExternalSaveFingerprints = new Map<string, Set<string>>();
   const authoritativeExternalSaveFingerprints = new Map<string, string>();
   const reportedStaleExternalSaveBlocks = new Set<string>();
+  // AETHER_EXTERNAL_WOLF_REPLACEMENT_INTENT_GUARD_V1: an external replacement stays authoritative until an explicit save-like write.
+  const externalReplacementGuardSlots = new Set<string>();
+  const externalReplacementGuardSince = new Map<string, number>();
+  const reportedExternalReplacementGuardEvents = new Set<string>();
+  const EXTERNAL_SAVE_REPLACEMENT_INTENT_WINDOW_MS = 2_000;
   function fingerprintExternalSaveBytes(bytes: Uint8Array): string {
     let left = 0x811c9dc5;
     let right = 0x9e3779b9;
@@ -650,6 +657,7 @@ function installAssetLoader(assets: WolfAsset[]) {
       const staleFingerprints = new Set<string>(
         slotKey ? (staleExternalSaveFingerprints.get(slotKey) ?? []) : [],
       );
+      let foundDifferentVirtualCopy = false;
       for (const path of paths) {
         try {
           if (!inspectFs.analyzePath || !inspectFs.readFile || !inspectFs.analyzePath(path).exists) continue;
@@ -659,7 +667,10 @@ function installAssetLoader(assets: WolfAsset[]) {
             : Uint8Array.from(previous, character => character.charCodeAt(0) & 255);
           if (previousBytes.byteLength === 0 || previousBytes.byteLength > 16 * 1024 * 1024) continue;
           const previousFingerprint = fingerprintExternalSaveBytes(previousBytes);
-          if (previousFingerprint !== externalFingerprint) staleFingerprints.add(previousFingerprint);
+          if (previousFingerprint !== externalFingerprint) {
+            staleFingerprints.add(previousFingerprint);
+            foundDifferentVirtualCopy = true;
+          }
         } catch (error) {
           console.warn(`AetherPlay: could not fingerprint old virtual save ${path}`, error);
         }
@@ -667,6 +678,10 @@ function installAssetLoader(assets: WolfAsset[]) {
       if (slotKey) {
         staleExternalSaveFingerprints.set(slotKey, staleFingerprints);
         authoritativeExternalSaveFingerprints.set(slotKey, externalFingerprint);
+        if (foundDifferentVirtualCopy) {
+          externalReplacementGuardSlots.add(slotKey);
+          externalReplacementGuardSince.set(slotKey, Date.now());
+        }
       }
       const fs = FS as unknown as {
         writeFile: (path: string, data: Uint8Array) => unknown;
@@ -682,6 +697,7 @@ function installAssetLoader(assets: WolfAsset[]) {
       }
       markExternalSaveCopiesChecked(relativePath);
       checkedExternalSavePaths.add(checkKey);
+      afterExternalSaveImport?.(relativePath);
       reportWriteback("EXTERNAL_SAVE_IMPORTED", relativePath, `bytes=${bytes.byteLength} copies=${paths.length}`);
       return true;
     } catch (error) {
@@ -725,6 +741,19 @@ function installAssetLoader(assets: WolfAsset[]) {
     const dirtySavePaths = new Set<string>();
     const dirtySaveGeneration = new Map<string, number>();
     const pendingWritebacks = new Map<string, { fingerprint: string; generation: number }>();
+    const explicitlyAuthorizedReplacementStreams = new WeakSet<object>();
+    afterExternalSaveImport = (relativePath: string): void => {
+      const slotKey = relativePath.split("/").pop()?.toLowerCase();
+      if (!slotKey) return;
+      let clearedPaths = 0;
+      for (const dirtyPath of [...dirtySavePaths]) {
+        if (saveSlotKey(dirtyPath) === slotKey) { dirtySavePaths.delete(dirtyPath); clearedPaths += 1; }
+      }
+      dirtySaveGeneration.delete(slotKey);
+      pendingWritebacks.delete(slotKey);
+      reportWriteback("EXTERNAL_SAVE_IMPORT_STATE_RESET", relativePath,
+        `clearedDirtyPaths=${clearedPaths}; external replacement reset old writeback intent`);
+    };
     let publishTimer: number | undefined;
     let scannedCount = 0;
     let publishCount = 0;
@@ -743,10 +772,35 @@ function installAssetLoader(assets: WolfAsset[]) {
       }
       return `${bytes.length}:${left.toString(16)}:${right.toString(16)}`;
     };
-    const markDirty = (pathInput: unknown, source: string): void => {
+    const markDirty = (pathInput: unknown, source: string, writeStream?: unknown): void => {
       if (writingExternalSaveIntoVirtualFs || !externalSaveRootRegistered) return;
       const slotKey = saveSlotKey(pathInput);
       if (!slotKey) return;
+      if (externalReplacementGuardSlots.has(slotKey)) {
+        const hasExplicitReplacementSaveIntent = source === "FS.write" &&
+          typeof writeStream === "object" && writeStream !== null &&
+          explicitlyAuthorizedReplacementStreams.has(writeStream as object);
+        if (!hasExplicitReplacementSaveIntent) {
+          const inputAgeMs = Date.now() - lastExternalSaveUserInputAt;
+          const guardKey = `${slotKey}:${source}`;
+          if (!reportedExternalReplacementGuardEvents.has(guardKey)) {
+            reportedExternalReplacementGuardEvents.add(guardKey);
+            reportWriteback("EXTERNAL_SAVE_REPLACEMENT_GUARD", String(pathInput),
+              `slot=${slotKey} source=${source} inputAgeMs=${inputAgeMs} input=${lastExternalSaveUserInputType}; external replacement remains authoritative; no authorized write stream`);
+          }
+          for (const dirtyPath of [...dirtySavePaths]) {
+            if (saveSlotKey(dirtyPath) === slotKey) dirtySavePaths.delete(dirtyPath);
+          }
+          dirtySaveGeneration.delete(slotKey);
+          pendingWritebacks.delete(slotKey);
+          return;
+        }
+        externalReplacementGuardSlots.delete(slotKey);
+        externalReplacementGuardSince.delete(slotKey);
+        explicitlyAuthorizedReplacementStreams.delete(writeStream as object);
+        reportWriteback("EXTERNAL_SAVE_REPLACEMENT_GUARD_RELEASED", String(pathInput),
+          `slot=${slotKey} source=${source}; write stream opened for write after recent user input; accepting new game save`);
+      }
       if (externallyDeletedSaveSlots.has(slotKey)) {
         const deletedAt = externalSaveDeletedAt.get(slotKey) ?? Date.now();
         const ageMs = Date.now() - deletedAt;
@@ -785,6 +839,45 @@ function installAssetLoader(assets: WolfAsset[]) {
       reportWriteback("SAVE_DIRTY", String(pathInput), `slot=${slotKey} generation=${generation} source=${source}`);
     };
 
+    // Generic input alone is not save intent. Require a save-slot stream opened for write
+    // after a user event that occurred after the external replacement was detected.
+    const fsWithOpenClose = fs as unknown as { open?: AnyFn; close?: AnyFn };
+    const oldOpenForReplacementGuard = fsWithOpenClose.open;
+    if (typeof oldOpenForReplacementGuard === "function") {
+      fsWithOpenClose.open = function (...args: unknown[]): unknown {
+        const inputAtOpen = lastExternalSaveUserInputAt;
+        const stream = (oldOpenForReplacementGuard as AnyFn).apply(FS, args);
+        const slotKey = saveSlotKey(args[0]);
+        const flags = args[1];
+        const writeAccess = typeof flags === "string"
+          ? /[wa+]/u.test(flags)
+          : typeof flags === "number" && (flags & 3) !== 0;
+        if (!insideWriteFile && !writingExternalSaveIntoVirtualFs && slotKey &&
+            externalReplacementGuardSlots.has(slotKey) && writeAccess &&
+            typeof stream === "object" && stream !== null) {
+          const replacedAt = externalReplacementGuardSince.get(slotKey) ?? Date.now();
+          const inputAgeMs = Date.now() - inputAtOpen;
+          if (inputAtOpen >= replacedAt && inputAgeMs >= 0 && inputAgeMs <= EXTERNAL_SAVE_REPLACEMENT_INTENT_WINDOW_MS) {
+            explicitlyAuthorizedReplacementStreams.add(stream as object);
+          }
+        }
+        return stream;
+      };
+    }
+    const oldCloseForReplacementGuard = fsWithOpenClose.close;
+    if (typeof oldCloseForReplacementGuard === "function") {
+      fsWithOpenClose.close = function (...args: unknown[]): unknown {
+        try {
+          return (oldCloseForReplacementGuard as AnyFn).apply(FS, args);
+        } finally {
+          const stream = args[0];
+          if (typeof stream === "object" && stream !== null) {
+            explicitlyAuthorizedReplacementStreams.delete(stream as object);
+          }
+        }
+      };
+    }
+
     // FS.write catches writes made through streams. The writeFile wrapper is also
     // needed because some Emscripten builds route it through internal helpers.
     const oldWrite = fs.write;
@@ -794,7 +887,7 @@ function installAssetLoader(assets: WolfAsset[]) {
         if (!insideWriteFile && !writingExternalSaveIntoVirtualFs) {
           const stream = args[0] as { path?: unknown } | undefined;
           const written = typeof result === "number" ? result : Number(args[3] ?? 0);
-          if (written > 0) markDirty(stream?.path, "FS.write");
+          if (written > 0) markDirty(stream?.path, "FS.write", stream);
         }
         return result;
       };
@@ -886,6 +979,15 @@ function installAssetLoader(assets: WolfAsset[]) {
               // Critical safety rule: cached/IDBFS-restored files are not write intent.
               // Publish only a file which the game actually wrote this session.
               if (!dirtySavePaths.has(normalizedPath) || !dirtySaveGeneration.has(slotKey)) continue;
+              if (externalReplacementGuardSlots.has(slotKey)) {
+                const guardKey = `${slotKey}:scan`;
+                if (!reportedExternalReplacementGuardEvents.has(guardKey)) {
+                  reportedExternalReplacementGuardEvents.add(guardKey);
+                  reportWriteback("EXTERNAL_SAVE_REPLACEMENT_WRITEBACK_BLOCKED", `Save/${name}`,
+                    `slot=${slotKey} reason=external replacement has not received explicit save intent source=${path}`);
+                }
+                continue;
+              }
               try {
                 const source = fs.readFile(path);
                 const bytes = source instanceof Uint8Array
@@ -896,7 +998,8 @@ function installAssetLoader(assets: WolfAsset[]) {
                 const scannedFingerprint = fingerprint(bytes);
                 const staleFingerprints = staleExternalSaveFingerprints.get(externalStaleSlotKey);
                 const authoritativeFingerprint = authoritativeExternalSaveFingerprints.get(externalStaleSlotKey);
-                if (staleFingerprints?.has(scannedFingerprint) && scannedFingerprint !== authoritativeFingerprint) {
+                if (externalReplacementGuardSlots.has(externalStaleSlotKey) &&
+                    staleFingerprints?.has(scannedFingerprint) && scannedFingerprint !== authoritativeFingerprint) {
                   const reportKey = `${externalStaleSlotKey}:${scannedFingerprint}:${authoritativeFingerprint ?? "unknown"}`;
                   if (!reportedStaleExternalSaveBlocks.has(reportKey)) {
                     reportedStaleExternalSaveBlocks.add(reportKey);
