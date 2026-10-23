@@ -2,7 +2,6 @@
 export const WOLF_HP_ROOT_POINTER_OFFSET = 0x0045e598;
 const ROOT_TO_SLOT_OFFSET = 0x84;
 const HP_FIELD_OFFSET = 0x08;
-const POINTER_BYTES = 4;
 
 export interface WolfHpPointerChainSnapshot {
   rootOffset: number;
