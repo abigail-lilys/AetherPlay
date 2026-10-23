@@ -60,6 +60,7 @@ interface PendingRequest {
   timeout: number;
 }
 interface GameDebugPanelProps {
+  visible: boolean;
   gameId: string;
   gameTitle: string;
   frameRef: RefObject<HTMLIFrameElement | null>;
@@ -96,7 +97,7 @@ function parentPath(path: string): string {
   return `/${parts.join("/")}`;
 }
 
-export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDebugPanelProps) {
+export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }: GameDebugPanelProps) {
   const [tab, setTab] = useState<DebugTab>("overview");
   const [capabilities, setCapabilities] = useState<DebugCapabilities | null>(null);
   const [currentPath, setCurrentPath] = useState("/");
@@ -336,14 +337,14 @@ export function GameDebugPanel({ gameId, gameTitle, frameRef, onClose }: GameDeb
   );
 
   return (
-    <div style={panelStyle} role="dialog" aria-modal="true" aria-label="游戏调试台">
+    <div style={{ ...panelStyle, display: visible ? "flex" : "none" }} role="dialog" aria-modal={visible} aria-hidden={!visible} aria-label="游戏调试台">
       <header style={{ padding: "max(14px, env(safe-area-inset-top, 0px)) 14px 12px", background: "#111a27", borderBottom: "1px solid #263449" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 17, fontWeight: 750 }}>游戏调试台</div>
             <div style={{ ...subtleStyle, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 3 }}>{gameTitle} · {capabilities?.engine || "等待运行时探测"}</div>
           </div>
-          <button type="button" onClick={onClose} style={buttonStyle} aria-label="关闭调试台">关闭 ✕</button>
+          <button type="button" onClick={onClose} style={buttonStyle} aria-label="返回游戏并保留搜索">返回游戏 ↩</button>
         </div>
         <nav style={{ display: "flex", gap: 8, marginTop: 13 }}>
           {tabButton("overview", "概览")}{tabButton("files", "虚拟文件")}{tabButton("memory", "内存修改")}
