@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Capacitor } from "@capacitor/core";
+import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
@@ -373,6 +375,52 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
+  const exportRuntimeIntrospection = async () => {
+    if (!runtimeIntrospection) return;
+    const exportedAt = new Date().toISOString();
+    const safeTitle = gameTitle.trim()
+      .replace(/[\\\/:*?"<>|\u0000-\u001f]/g, "_")
+      .replace(/\s+/g, "_")
+      .slice(0, 48) || "WOLF";
+    const timestamp = exportedAt.replace(/[:.]/g, "-");
+    const filename = `AetherPlay-${safeTitle}-runtime-introspection-${timestamp}.json`;
+    const payload = {
+      format: "aetherplay-wolf-runtime-introspection",
+      schemaVersion: 1,
+      exportedAt,
+      game: { id: gameId, title: gameTitle },
+      runtimeCapabilities: capabilities,
+      runtimeIntrospection,
+    };
+    const content = `${JSON.stringify(payload, null, 2)}\n`;
+
+    setBusy("正在导出探针 JSON 文件…");
+    setError("");
+    setNotice("");
+    try {
+      if (Capacitor.getPlatform() === "android") {
+        // Uses Android's system document picker; no clipboard or WebView download support needed.
+        await saveAndroidTextFile(filename, content);
+      } else {
+        const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }
+      setNotice(`已导出完整探针 JSON：${filename}。请把保存的 JSON 文件发回聊天分析。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? `导出 JSON 失败：${cause.message}` : `导出 JSON 失败：${String(cause)}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const loadVariableCatalog = async () => {
     setBusy("正在读取 WOLF 变量元数据…"); setError(""); setNotice("");
     try {
@@ -438,12 +486,13 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
             </button>
             {runtimeIntrospection ? (
               <div style={{ marginTop: 12 }}>
-                <div style={{ ...subtleStyle, lineHeight: 1.6, marginBottom: 6 }}>
-                  这是只读探针结果，不会修改游戏内存。长按下方文本可选择并复制 JSON 发回分析。
+                <div style={{ ...subtleStyle, lineHeight: 1.6, marginBottom: 8 }}>
+                  探针结果已就绪。此操作只导出诊断数据，不会修改游戏内存；点击后通过 Android 系统保存窗口生成完整 JSON 文件，无需长按或复制文本。
                 </div>
-                <textarea aria-label="WOLF 运行时接口探针 JSON" readOnly rows={16}
-                  value={JSON.stringify(runtimeIntrospection, null, 2)}
-                  style={{ ...inputStyle, fontFamily: "monospace", fontSize: 11, lineHeight: 1.45, resize: "vertical" }} />
+                <button type="button" style={{ ...buttonStyle, width: "100%" }}
+                  disabled={Boolean(busy)} onClick={() => void exportRuntimeIntrospection()}>
+                  {busy.includes("导出探针 JSON 文件") ? "正在导出…" : "导出探针 JSON 文件"}
+                </button>
               </div>
             ) : null}
           </section>
