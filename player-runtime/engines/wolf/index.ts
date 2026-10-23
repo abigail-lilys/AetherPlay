@@ -28,6 +28,7 @@ import { normalizeWolfPath, wolfPathKeys } from "@/player-runtime/engines/wolf/p
 import { installWolfCompatibility } from "@/player-runtime/engines/wolf/compatibility";
 import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibility";
 import { createWasmMemoryScanner, type WasmScanFilter, type WasmScanType } from "@/player-runtime/engines/wolf/memoryScanner";
+import { buildWolfVariableCatalog, type WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 
 declare const Module: WolfRuntimeModule;
 declare const FS: {
@@ -54,7 +55,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+  command: "probe" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -86,6 +87,7 @@ type AetherDebugResponse = {
   scan?: { scanType: WasmScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; unknownBaselinePending: boolean; scanStartOffset: number; scanEndOffset: number; results: Array<{ offset: number; value: number }> };
   memoryValue?: number;
   frozenCount?: number;
+  variableCatalog?: WolfVariableCatalog;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -217,6 +219,60 @@ function aetherDebugGetMemoryBuffer(): ArrayBufferLike | undefined {
   return buffer && buffer.byteLength > 0 ? buffer : undefined;
 }
 const aetherDebugScanner = createWasmMemoryScanner(aetherDebugGetMemoryBuffer);
+
+function aetherDebugMetadataAssetPaths(): string[] {
+  const host = window as typeof window & {
+    __AETHERPLAY_WOLF_ASSET_PATHS__?: string[];
+  };
+  const eligible = (path: string) => /(?:^|\/)(?:SysDataBase|SysDataBaseBasic)\.project$/iu.test(path) ||
+    /(?:^|\/)CommonEvent\.dat$/iu.test(path);
+  if (Array.isArray(host.__AETHERPLAY_WOLF_ASSET_PATHS__)) {
+    return [...new Set(host.__AETHERPLAY_WOLF_ASSET_PATHS__.filter(eligible))];
+  }
+  // Packed/runtime fallback: inspect virtual directory entries only. Readdir on
+  // a file throws quickly; avoid stat/open on every asset because those hooks can
+  // invoke the lazy loader and would download unrelated game assets.
+  const fs = aetherDebugFs();
+  const found: string[] = [];
+  const visited = new Set<string>();
+  let visitedDirectories = 0;
+  const walk = (directory: string, depth: number): void => {
+    if (depth > 12 || visitedDirectories >= 8000 || visited.has(directory)) return;
+    visited.add(directory);
+    visitedDirectories += 1;
+    let names: string[];
+    try { names = fs.readdir(directory); } catch { return; }
+    for (const name of names) {
+      if (!name || name === "." || name === "..") continue;
+      const child = directory === "/" ? `/${name}` : `${directory}/${name}`;
+      if (eligible(child)) found.push(child.replace(/^\/+/, ""));
+      if (depth >= 12 || name.startsWith(".") || /^Save$/iu.test(name) || /^\.aetherplay-debug-backups$/iu.test(name)) continue;
+      walk(child, depth + 1);
+      if (visitedDirectories >= 8000) break;
+    }
+  };
+  walk("/", 0);
+  return [...new Set(found)];
+}
+
+function aetherDebugReadMetadataAsset(path: string): Uint8Array | undefined {
+  const host = window as typeof window & {
+    __AETHERPLAY_WOLF_LOAD_ASSET__?: (path: unknown) => boolean;
+  };
+  try {
+    host.__AETHERPLAY_WOLF_LOAD_ASSET__?.(path);
+    const normalized = aetherDebugNormalizePath(path);
+    const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
+    const fs = aetherDebugFs();
+    if (!fs.analyzePath(absolute).exists) return undefined;
+    const bytes = aetherDebugToBytes(fs.readFile(absolute));
+    if (bytes.byteLength > 32 * 1024 * 1024) return undefined;
+    return bytes;
+  } catch {
+    return undefined;
+  }
+}
+
 function aetherDebugNormalizePath(value: string): string {
   if (typeof value !== "string" || value.length > 2048 || value.includes("\0")) throw new Error("无效文件路径。");
   const parts: string[] = [];
@@ -322,7 +378,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
+  if (!command || (command !== "probe" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear")) return;
   try {
     if (command === "probe") {
       const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
@@ -361,6 +417,12 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
     if (command === "read-file") {
       const file = aetherDebugReadFile(message.path || "/");
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, file });
+      return;
+    }
+    if (command === "variable-catalog") {
+      const paths = aetherDebugMetadataAssetPaths();
+      const variableCatalog = buildWolfVariableCatalog(paths, aetherDebugReadMetadataAsset);
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, variableCatalog });
       return;
     }
     if (command === "scan-first") {
@@ -1304,6 +1366,13 @@ function installAssetLoader(assets: WolfAsset[]) {
     console.log(`Wolf Tools loaded asset: ${asset.path} (${bytes.byteLength} bytes)`);
     return true;
   }
+
+  const debugAssetHost = window as typeof window & {
+    __AETHERPLAY_WOLF_ASSET_PATHS__?: string[];
+    __AETHERPLAY_WOLF_LOAD_ASSET__?: (path: unknown) => boolean;
+  };
+  debugAssetHost.__AETHERPLAY_WOLF_ASSET_PATHS__ = assets.map((asset) => asset.path);
+  debugAssetHost.__AETHERPLAY_WOLF_LOAD_ASSET__ = (path) => load(path);
 
   runtimeModule.preRun.push((initializedModule) => {
     activeModule = initializedModule ?? runtimeModule;

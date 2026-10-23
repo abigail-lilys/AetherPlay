@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
+import { WolfVariableCatalogView } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
-type DebugTab = "overview" | "files" | "memory";
+type DebugCommand = "probe" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear";
+type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
 type DebugScanFilter = "changed" | "unchanged" | "increased" | "decreased" | "equal" | "not-equal" | "greater" | "less" | "between";
@@ -53,6 +55,7 @@ interface DebugResponse {
   scan?: DebugScanSummary;
   memoryValue?: number;
   frozenCount?: number;
+  variableCatalog?: WolfVariableCatalog;
 }
 interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; }
 interface PendingRequest {
@@ -122,6 +125,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [scanResults, setScanResults] = useState<DebugScanResult[]>([]);
   const [rowValues, setRowValues] = useState<Record<number, string>>({});
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
+  const [variableCatalog, setVariableCatalog] = useState<WolfVariableCatalog | null>(null);
   const pending = useRef(new Map<string, PendingRequest>());
 
   const request = useCallback((command: DebugCommand, args: DebugRequestArgs = {}) => {
@@ -132,7 +136,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -351,6 +355,18 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
 
+  const loadVariableCatalog = async () => {
+    setBusy("正在读取 WOLF 变量元数据…"); setError(""); setNotice("");
+    try {
+      const response = await request("variable-catalog");
+      if (!response.variableCatalog) throw new Error("运行时没有返回 WOLF 变量目录。");
+      setVariableCatalog(response.variableCatalog);
+      setNotice(`变量目录已读取：${response.variableCatalog.totalVariables.toLocaleString()} 个目录项，${response.variableCatalog.groups.length} 个类别。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const tabButton = (value: DebugTab, label: string) => (
     <button key={value} type="button" onClick={() => { setTab(value); setError(""); }}
       style={{ ...buttonStyle, flex: 1, background: tab === value ? "#28528a" : "#182335", borderColor: tab === value ? "#5e9ce9" : "#354258" }}>
@@ -374,7 +390,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
           <button type="button" onClick={onClose} style={buttonStyle} aria-label="返回游戏并保留搜索">返回游戏 ↩</button>
         </div>
         <nav style={{ display: "flex", gap: 8, marginTop: 13 }}>
-          {tabButton("overview", "概览")}{tabButton("files", "虚拟文件")}{tabButton("memory", "内存修改")}
+          {tabButton("overview", "概览")}{tabButton("files", "虚拟文件")}{tabButton("variables", "变量表")}{tabButton("memory", "内存修改")}
         </nav>
       </header>
 
@@ -401,6 +417,9 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
           </section>
         ) : null}
 
+        {tab === "variables" ? (
+          <WolfVariableCatalogView catalog={variableCatalog} loading={Boolean(busy)} onLoad={() => void loadVariableCatalog()} />
+        ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
