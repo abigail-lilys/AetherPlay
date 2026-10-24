@@ -57,7 +57,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -70,6 +70,7 @@ type AetherDebugCommand = {
   page?: number;
   aligned?: boolean;
   offset?: number;
+  neighborhoodRadius?: number;
   value?: number;
   expectedValue?: number;
 };
@@ -89,6 +90,7 @@ type AetherDebugResponse = {
   backupPath?: string;
   scan?: { scanType: WasmScanType; count: number; scannedBytes: number; truncated: boolean; aligned: boolean; page: number; pageCount: number; unknownBaselinePending: boolean; scanStartOffset: number; scanEndOffset: number; results: Array<{ offset: number; value: number }> };
   memoryValue?: number;
+  neighborhood?: AetherDebugMemoryNeighborhood;
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
   runtimeIntrospection?: AetherRuntimeIntrospection;
@@ -107,6 +109,8 @@ const AETHER_DEBUG_MAX_BYTES = 256 * 1024;
 type AetherDebugAddressWord = { offset: number; hex: string; value: number; signedValue: number; floatValue: number };
 type AetherDebugAddressReference = { offset: number; offsetHex: string; pointsTo: number; pointsToHex: string; delta: number; exact: boolean; context: AetherDebugAddressWord[] };
 type AetherDebugAddressTrace = { targetOffset: number; targetHex: string; memoryBytes: number; scannedBytes: number; scannedWords: number; radiusBytes: number; exactReferenceCount: number; nearbyReferenceCount: number; referencesTruncated: boolean; references: AetherDebugAddressReference[]; targetContext: AetherDebugAddressWord[]; notes: string[] };
+type AetherDebugMemoryNeighborhoodWord = { offset: number; offsetHex: string; hex: string; u32: number; i32: number; f32: number };
+type AetherDebugMemoryNeighborhood = { capturedAt: string; anchorOffset: number; anchorHex: string; radiusBytes: number; memoryBytes: number; words: AetherDebugMemoryNeighborhoodWord[] };
 
 // AetherPlay diagnostic: capture WebAssembly.Memory without relying on
 // Emscripten Module.HEAP* properties.
@@ -243,6 +247,46 @@ function aetherDebugReadAddressWords(view: DataView, center: number, radius = 16
     words.push({ offset, hex: `0x${value.toString(16).padStart(8, "0")}`, value, signedValue: view.getInt32(offset, true), floatValue: view.getFloat32(offset, true) });
   }
   return words;
+}
+
+function aetherDebugReadMemoryNeighborhood(
+  anchorOffset: number,
+  radiusBytes: number,
+): AetherDebugMemoryNeighborhood {
+  if (!Number.isSafeInteger(anchorOffset) || anchorOffset < 0 || anchorOffset > 0xffffffff)
+    throw new Error("锚点地址必须是 0 至 0xFFFFFFFF 范围内的 WASM32 字节偏移。");
+  if (!Number.isSafeInteger(radiusBytes) || radiusBytes < 0 || radiusBytes > 512)
+    throw new Error("邻域半径必须是 0 至 512 的整数；为避免影响 Android WebView，单次最多读取 257 个 32 位字。");
+  const buffer = aetherDebugGetMemoryBuffer();
+  if (!buffer || buffer.byteLength < 4) throw new Error("尚未取得可读的 WASM 内存。");
+  if (anchorOffset + 4 > buffer.byteLength)
+    throw new Error(`锚点超出当前 WASM 内存；当前长度 ${buffer.byteLength} 字节。`);
+
+  const center = Math.floor(anchorOffset / 4) * 4;
+  const start = Math.max(0, Math.floor((center - radiusBytes) / 4) * 4);
+  const lastAlignedOffset = Math.floor((buffer.byteLength - 4) / 4) * 4;
+  const end = Math.min(lastAlignedOffset, Math.ceil((center + radiusBytes) / 4) * 4);
+  const view = new DataView(buffer);
+  const words: AetherDebugMemoryNeighborhoodWord[] = [];
+  for (let offset = start; offset <= end; offset += 4) {
+    const u32 = view.getUint32(offset, true);
+    words.push({
+      offset,
+      offsetHex: `0x${offset.toString(16).toUpperCase().padStart(8, "0")}`,
+      hex: `0x${u32.toString(16).toUpperCase().padStart(8, "0")}`,
+      u32,
+      i32: view.getInt32(offset, true),
+      f32: view.getFloat32(offset, true),
+    });
+  }
+  return {
+    capturedAt: new Date().toISOString(),
+    anchorOffset,
+    anchorHex: `0x${anchorOffset.toString(16).toUpperCase().padStart(8, "0")}`,
+    radiusBytes,
+    memoryBytes: view.byteLength,
+    words,
+  };
 }
 
 async function aetherDebugTraceAddress(targetOffset: number): Promise<AetherDebugAddressTrace> {
@@ -469,7 +513,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write")) return;
   try {
     if (command === "runtime-introspect") {
       const runtimeIntrospection = aetherDebugInspectRuntimeSurface();
@@ -567,6 +611,14 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
     if (command === "memory-read") {
       const memoryValue = aetherDebugScanner.read(message.scanType as WasmScanType, Number(message.offset));
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, memoryValue }); return;
+    }
+    if (command === "memory-neighborhood") {
+      const neighborhood = aetherDebugReadMemoryNeighborhood(
+        Number(message.offset),
+        message.neighborhoodRadius === undefined ? 128 : Number(message.neighborhoodRadius),
+      );
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, neighborhood });
+      return;
     }
     if (command === "memory-write") {
       const memoryValue = aetherDebugScanner.write(message.scanType as WasmScanType, Number(message.offset), Number(message.value));

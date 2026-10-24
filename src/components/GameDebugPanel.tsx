@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -17,6 +17,8 @@ interface DebugScanSummary { scanType: DebugScanType; count: number; scannedByte
 interface DebugAddressWord { offset: number; hex: string; value: number; signedValue: number; floatValue: number }
 interface DebugAddressReference { offset: number; offsetHex: string; pointsTo: number; pointsToHex: string; delta: number; exact: boolean; context: DebugAddressWord[] }
 interface DebugAddressTrace { targetOffset: number; targetHex: string; memoryBytes: number; scannedBytes: number; scannedWords: number; radiusBytes: number; exactReferenceCount: number; nearbyReferenceCount: number; referencesTruncated: boolean; references: DebugAddressReference[]; targetContext: DebugAddressWord[]; notes: string[] }
+interface DebugNeighborhoodWord { offset: number; offsetHex: string; hex: string; u32: number; i32: number; f32: number }
+interface DebugNeighborhoodSnapshot { capturedAt: string; anchorOffset: number; anchorHex: string; radiusBytes: number; memoryBytes: number; words: DebugNeighborhoodWord[] }
 interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
 
 interface DebugEntry {
@@ -66,8 +68,9 @@ interface DebugResponse {
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
+  neighborhood?: DebugNeighborhoodSnapshot;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; value?: number; expectedValue?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -134,6 +137,11 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [scanSummary, setScanSummary] = useState<DebugScanSummary | null>(null);
   const [traceAddressText, setTraceAddressText] = useState("0x0795c0b0");
   const [addressTrace, setAddressTrace] = useState<DebugAddressTrace | null>(null);
+  // Default anchor is the candidate address from the previous "mi" game report; replace it for other games.
+  const [neighborhoodAddressText, setNeighborhoodAddressText] = useState("0x03CECC0C");
+  const [neighborhoodRadiusText, setNeighborhoodRadiusText] = useState("128");
+  const [neighborhoodSnapshot, setNeighborhoodSnapshot] = useState<DebugNeighborhoodSnapshot | null>(null);
+  const [neighborhoodBaseline, setNeighborhoodBaseline] = useState<DebugNeighborhoodSnapshot | null>(null);
   const [scanResults, setScanResults] = useState<DebugScanResult[]>([]);
   const [rowValues, setRowValues] = useState<Record<number, string>>({});
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
@@ -313,6 +321,35 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  const captureMemoryNeighborhood = async () => {
+    let offset: number;
+    let radius: number;
+    try {
+      offset = readAddressInput(neighborhoodAddressText, "锚点地址") as number;
+      radius = readAddressInput(neighborhoodRadiusText, "邻域半径") as number;
+      if (!Number.isSafeInteger(offset) || offset > 0xffffffff) throw new Error("锚点必须是有效的 WASM32 地址（不超过 0xFFFFFFFF）。");
+      if (!Number.isSafeInteger(radius) || radius < 0 || radius > 512) throw new Error("邻域半径必须是 0 至 512 的整数。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    setBusy("正在读取锚点周边 WASM 内存（只读）…"); setError(""); setNotice("");
+    try {
+      const response = await request("memory-neighborhood", { offset, neighborhoodRadius: radius });
+      if (!response.neighborhood) throw new Error("运行时没有返回内存邻域快照。");
+      setNeighborhoodSnapshot(response.neighborhood);
+      const compatible = neighborhoodBaseline && neighborhoodBaseline.anchorOffset === response.neighborhood.anchorOffset && neighborhoodBaseline.radiusBytes === response.neighborhood.radiusBytes;
+      const changedCount = compatible
+        ? response.neighborhood.words.filter((word) => neighborhoodBaseline!.words.find((prior) => prior.offset === word.offset)?.hex !== word.hex).length
+        : null;
+      setNotice(compatible
+        ? `邻域快照完成：${response.neighborhood.words.length} 个 32 位字；相对基线有 ${changedCount} 处原始值变化。`
+        : `邻域快照完成：${response.neighborhood.words.length} 个 32 位字。可将当前快照设为基线，再采集一次比较变化。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const refreshHpChain = async () => {
     setBusy("正在重新解析动态 HP 指针链…"); setError(""); setNotice("");
     try {
@@ -381,6 +418,41 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       await saveAndroidTextFile(filename, JSON.stringify(report, null, 2));
       setNotice(`已请求保存 ${filename}。`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
+  };
+
+  const exportMemoryNeighborhood = async () => {
+    if (!neighborhoodSnapshot) return;
+    const comparable = neighborhoodBaseline && neighborhoodBaseline.anchorOffset === neighborhoodSnapshot.anchorOffset && neighborhoodBaseline.radiusBytes === neighborhoodSnapshot.radiusBytes;
+    const differences = comparable
+      ? neighborhoodSnapshot.words.flatMap((word) => {
+          const prior = neighborhoodBaseline!.words.find((item) => item.offset === word.offset);
+          return prior && prior.hex !== word.hex ? [{ offset: word.offset, offsetHex: word.offsetHex, before: prior, after: word }] : [];
+        })
+      : null;
+    const payload = {
+      format: "aetherplay-wolf-memory-neighborhood-diff",
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      game: { id: gameId, title: gameTitle },
+      baseline: neighborhoodBaseline,
+      current: neighborhoodSnapshot,
+      comparable: Boolean(comparable),
+      differences,
+      notes: [
+        "这是只读的 32 位小端内存邻域快照；采集过程不修改游戏内存。",
+        "hex/u32/i32/f32 是同一组 4 字节的不同解释，浮点解释不代表该位置必然是浮点变量。",
+        "地址属于当前 WASM 游戏实例；重启或重新进入游戏后可能变化。",
+        "默认锚点来自此前 mi 游戏的 V17（所持金）候选地址 0x03CECC0C；其他游戏必须先确认并替换锚点。",
+      ],
+    };
+    const filename = `AetherPlay-WOLF-Memory-Neighborhood-${Date.now()}.json`;
+    setBusy("正在导出内存邻域差分 JSON…"); setError("");
+    try {
+      await saveAndroidTextFile(filename, JSON.stringify(payload, null, 2));
+      setNotice(`已请求保存邻域快照与差分：${filename}`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
   };
 
   const runFirstScan = async () => {
@@ -691,7 +763,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       notes: [
         "这些地址是候选，不代表已经证明它们存储该变量。",
         "后续需要比较不同变量编号的候选地址关系。",
-        "此次首次快照默认只覆盖 WASM 内存前 64 MiB。",
+        `本次快照实际覆盖 0x${scanSummary.scanStartOffset.toString(16).toUpperCase().padStart(8, "0")}–0x${scanSummary.scanEndOffset.toString(16).toUpperCase().padStart(8, "0")}（结束地址不包含在内），共扫描 ${formatBytes(scanSummary.scannedBytes)}。`,
       ],
     };
 
@@ -710,6 +782,15 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       setBusy("");
     }
   };
+
+  const neighborhoodBaselineMatches = Boolean(
+    neighborhoodBaseline && neighborhoodSnapshot &&
+    neighborhoodBaseline.anchorOffset === neighborhoodSnapshot.anchorOffset &&
+    neighborhoodBaseline.radiusBytes === neighborhoodSnapshot.radiusBytes,
+  );
+  const neighborhoodChanges = neighborhoodBaselineMatches
+    ? neighborhoodSnapshot!.words.filter((word) => neighborhoodBaseline!.words.find((prior) => prior.offset === word.offset)?.hex !== word.hex)
+    : [];
 
   const tabButton = (value: DebugTab, label: string) => (
     <button key={value} type="button" onClick={() => { setTab(value); setError(""); }}
@@ -797,6 +878,54 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>锚点周边内存快照（只读）</div>
+              <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
+                采集锚点前后对齐的 32 位字，同时显示十六进制、UInt32、Int32 与 Float32；保存第一份作为基线，之后再次采集即可自动标出发生变化的地址。不需要让相邻变量主动变化。
+                默认地址 0x03CECC0C 来自此前 mi 游戏的 V17 候选；若当前是其他游戏/新实例，请填入已确认的当前地址。
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr)", gap: 8, marginTop: 10 }}>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>锚点地址
+                  <input value={neighborhoodAddressText} onChange={(event) => setNeighborhoodAddressText(event.target.value)} placeholder="例如 0x03CECC0C" style={inputStyle} />
+                </label>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>前后范围（字节）
+                  <input value={neighborhoodRadiusText} inputMode="numeric" onChange={(event) => setNeighborhoodRadiusText(event.target.value)} placeholder="128" style={inputStyle} />
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void captureMemoryNeighborhood()} style={{ ...buttonStyle, flex: 1, background: "#245c4b", borderColor: "#397c66" }}>采集快照</button>
+                <button type="button" disabled={Boolean(busy) || !neighborhoodSnapshot} onClick={() => {
+                  if (!neighborhoodSnapshot) return;
+                  setNeighborhoodBaseline(neighborhoodSnapshot);
+                  setNotice(`已保存基线：${neighborhoodSnapshot.anchorHex}，${neighborhoodSnapshot.words.length} 个字。回到游戏后再采集一次即可比较。`);
+                }} style={{ ...buttonStyle, flex: 1 }}>设为基线</button>
+              </div>
+              <button type="button" disabled={Boolean(busy) || !neighborhoodSnapshot} onClick={() => void exportMemoryNeighborhood()} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>导出快照与差分 JSON</button>
+              {neighborhoodSnapshot ? (
+                <div style={{ marginTop: 10 }}>
+                  {infoRow("锚点 / 采集时间", `${neighborhoodSnapshot.anchorHex} · ${new Date(neighborhoodSnapshot.capturedAt).toLocaleTimeString()}`)}
+                  {infoRow("实际内存范围", `${formatBytes(neighborhoodSnapshot.memoryBytes)} · ${neighborhoodSnapshot.words.length} 个对齐字`)}
+                  {infoRow("基线状态", neighborhoodBaselineMatches ? `可比较 · ${neighborhoodChanges.length} 处变化` : neighborhoodBaseline ? "基线地址/范围不一致，请重新设基线" : "尚未设置；先采集快照，再点击“设为基线”")}
+                  <div style={{ ...subtleStyle, marginTop: 8, lineHeight: 1.5 }}>变化比较以原始 32 位 hex 字为准。橙色表示相对基线改变，蓝色表示锚点所在的对齐字。</div>
+                  <div style={{ marginTop: 8, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
+                    {neighborhoodSnapshot.words.map((word) => {
+                      const prior = neighborhoodBaselineMatches ? neighborhoodBaseline!.words.find((item) => item.offset === word.offset) : undefined;
+                      const changed = Boolean(prior && prior.hex !== word.hex);
+                      const isAnchor = word.offset === Math.floor(neighborhoodSnapshot.anchorOffset / 4) * 4;
+                      return <div key={word.offset} style={{ padding: "8px 9px", borderBottom: "1px solid #202b3a", background: changed ? "#392a1b" : isAnchor ? "#172c46" : "#0f1722" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}>
+                          <code style={{ color: isAnchor ? "#9fc6ff" : changed ? "#ffd28a" : "#c7d2e2" }}>{word.offsetHex}{isAnchor ? "  ← 锚点" : ""}</code>
+                          <code>{word.hex}</code>
+                        </div>
+                        <div style={{ ...subtleStyle, marginTop: 3, overflowWrap: "anywhere" }}>
+                          {prior ? `Int32 ${prior.i32} → ${word.i32} · UInt32 ${prior.u32} → ${word.u32}` : `Int32 ${word.i32} · UInt32 ${word.u32}`} · Float32 {Number.isFinite(word.f32) ? word.f32.toPrecision(7) : String(word.f32)}
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                </div>
+              ) : <div style={{ ...subtleStyle, marginTop: 8 }}>尚无快照。此功能只读取当前 WASM 内存，不会写入或锁定任何值。</div>}
+            </div>
             <div style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14 }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>已知地址直接读取（只读）</div>
               <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
