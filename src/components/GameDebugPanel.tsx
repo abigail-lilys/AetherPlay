@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -69,6 +69,9 @@ interface DebugResponse {
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
   neighborhood?: DebugNeighborhoodSnapshot;
+  wasmBinary?: Uint8Array;
+  wasmBinaryBytes?: number;
+  wasmBinaryCaptureStatus?: string;
 }
 interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; }
 interface PendingRequest {
@@ -165,7 +168,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -598,6 +601,54 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  const exportWasmBinary = async () => {
+    setBusy("正在导出 Woditor WASM 二进制…");
+    setError("");
+    setNotice("");
+    try {
+      const response = await request("wasm-binary-export");
+      const bytes = response.wasmBinary;
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+        throw new Error(response.wasmBinaryCaptureStatus || "运行时没有返回 WASM 二进制。请完全退出并重新启动游戏后重试。");
+      }
+
+      // Encode in chunks divisible by 3 so independently encoded base64 chunks concatenate safely.
+      const encodedChunks: string[] = [];
+      const chunkSize = 24 * 1024;
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+        const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.byteLength));
+        encodedChunks.push(btoa(String.fromCharCode(...chunk)));
+      }
+      const base64 = encodedChunks.join("");
+      const safeTitle = gameTitle.trim()
+        .replace(/[\\\/:*?"<>|\u0000-\u001f]/g, "_")
+        .replace(/\s+/g, "_")
+        .slice(0, 48) || "WOLF";
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `AetherPlay-${safeTitle}-woditor-${bytes.byteLength}B-${timestamp}.wasm.b64.txt`;
+
+      if (Capacitor.getPlatform() === "android") {
+        await saveAndroidTextFile(filename, base64);
+      } else {
+        const blob = new Blob([base64], { type: "text/plain;charset=us-ascii" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }
+      setNotice(`已导出 WASM Base64：${filename}（原始 ${bytes.byteLength.toLocaleString()} 字节）。把文件发回聊天，或在 Termux 用 base64 -d 解码。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? `导出 WASM 失败：${cause.message}` : `导出 WASM 失败：${String(cause)}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const loadVariableCatalog = async () => {
     setBusy("正在读取 WOLF 变量元数据…"); setError(""); setNotice("");
     try {
@@ -851,6 +902,10 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                 <button type="button" style={{ ...buttonStyle, width: "100%" }}
                   disabled={Boolean(busy)} onClick={() => void exportRuntimeIntrospection()}>
                   {busy.includes("导出探针 JSON 文件") ? "正在导出…" : "导出探针 JSON 文件"}
+                </button>
+                <button type="button" style={{ ...buttonStyle, width: "100%", marginTop: 8 }}
+                  disabled={Boolean(busy)} onClick={() => void exportWasmBinary()}>
+                  {busy.includes("导出 Woditor WASM") ? "正在导出 WASM…" : "导出 Woditor WASM 二进制（静态分析）"}
                 </button>
               </div>
             ) : null}

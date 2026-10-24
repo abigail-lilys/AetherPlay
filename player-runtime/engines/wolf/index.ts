@@ -57,7 +57,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -96,6 +96,9 @@ type AetherDebugResponse = {
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
+  wasmBinary?: Uint8Array;
+  wasmBinaryBytes?: number;
+  wasmBinaryCaptureStatus?: string;
 };
 type AetherDebugFS = {
   analyzePath(path: string): { exists: boolean };
@@ -122,6 +125,8 @@ type AetherDebugWasmApi = {
 let aetherDebugCapturedMemory: WebAssembly.Memory | undefined;
 let aetherDebugCapturedWasmModule: WebAssembly.Module | undefined;
 let aetherDebugMemorySource = "未捕获";
+let aetherDebugCapturedWasmBytes: Uint8Array | undefined;
+let aetherDebugWasmBinaryCaptureError = "尚未捕获 WASM 二进制。";
 let aetherDebugWasmInstantiateCalls = 0;
 let aetherDebugWasmCaptureHookInstalled = false;
 let aetherDebugCapturedWasmExports: ReturnType<typeof summarizeWasmExports> = [];
@@ -186,6 +191,49 @@ function aetherDebugCaptureMemoryTree(
   }
 }
 
+function aetherDebugCaptureWasmSource(source: unknown): void {
+  const captureResponse = async (candidate: unknown): Promise<void> => {
+    if (!(candidate instanceof Response)) {
+      aetherDebugWasmBinaryCaptureError = "instantiateStreaming 的输入不是 Response；未能复制 WASM 原始字节。";
+      return;
+    }
+    try {
+      // Clone before instantiateStreaming consumes the original response body.
+      const bytes = new Uint8Array(await candidate.clone().arrayBuffer());
+      if (bytes.byteLength === 0) {
+        aetherDebugWasmBinaryCaptureError = "捕获到的 WASM 响应为空。";
+        return;
+      }
+      if (!aetherDebugCapturedWasmBytes || bytes.byteLength > aetherDebugCapturedWasmBytes.byteLength) {
+        aetherDebugCapturedWasmBytes = bytes;
+        aetherDebugWasmBinaryCaptureError = "";
+      }
+    } catch (cause) {
+      aetherDebugWasmBinaryCaptureError = cause instanceof Error
+        ? `复制 WASM Response 失败：${cause.message}`
+        : `复制 WASM Response 失败：${String(cause)}`;
+    }
+  };
+
+  try {
+    if (source instanceof Response) {
+      // Handle a direct Response synchronously enough to clone before the original call.
+      void captureResponse(source);
+    } else {
+      // Emscripten normally passes Promise<Response> to instantiateStreaming.
+      void Promise.resolve(source).then(captureResponse).catch((cause: unknown) => {
+        aetherDebugWasmBinaryCaptureError = cause instanceof Error
+          ? `等待 WASM Response 失败：${cause.message}`
+          : `等待 WASM Response 失败：${String(cause)}`;
+      });
+    }
+  } catch (cause) {
+    aetherDebugWasmBinaryCaptureError = cause instanceof Error
+      ? `启动 WASM 二进制捕获失败：${cause.message}`
+      : `启动 WASM 二进制捕获失败：${String(cause)}`;
+  }
+}
+
 function aetherDebugInstallWasmCapture(): void {
   if (typeof WebAssembly === "undefined") return;
 
@@ -199,6 +247,7 @@ function aetherDebugInstallWasmCapture(): void {
     try {
       api[method] = (...args: unknown[]): unknown => {
         aetherDebugWasmInstantiateCalls += 1;
+        if (method === "instantiateStreaming") aetherDebugCaptureWasmSource(args[0]);
         aetherDebugCapturedWasmImports = summarizeWasmImports(args[1]);
         aetherDebugCaptureMemoryTree(
           args[1],
@@ -640,8 +689,20 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
+    if (command === "wasm-binary-export") {
+      const bytes = aetherDebugCapturedWasmBytes;
+      if (!bytes || bytes.byteLength === 0) {
+        throw new Error(aetherDebugWasmBinaryCaptureError || "没有捕获到 WASM 二进制。请完全退出并重新启动该游戏，然后再试。");
+      }
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true, wasmBinary: bytes, wasmBinaryBytes: bytes.byteLength,
+        wasmBinaryCaptureStatus: "已复制 instantiateStreaming 的原始 Response 字节；未修改运行中内存。",
+      });
+      return;
+    }
     if (command === "runtime-introspect") {
       const runtimeIntrospection = aetherDebugInspectRuntimeSurface();
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, runtimeIntrospection });
