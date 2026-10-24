@@ -120,6 +120,7 @@ type AetherDebugWasmApi = {
 };
 
 let aetherDebugCapturedMemory: WebAssembly.Memory | undefined;
+let aetherDebugCapturedWasmModule: WebAssembly.Module | undefined;
 let aetherDebugMemorySource = "未捕获";
 let aetherDebugWasmInstantiateCalls = 0;
 let aetherDebugWasmCaptureHookInstalled = false;
@@ -132,6 +133,11 @@ function aetherDebugCaptureMemoryTree(
   depth = 0,
 ): void {
   if (typeof WebAssembly === "undefined") return;
+
+  if (value instanceof WebAssembly.Module) {
+    aetherDebugCapturedWasmModule = value;
+    return;
+  }
 
   if (value instanceof WebAssembly.Memory) {
     // Prefer a memory explicitly exported by the instantiated WASM.
@@ -341,18 +347,139 @@ async function aetherDebugTraceAddress(targetOffset: number): Promise<AetherDebu
   };
 }
 
+type AetherDebugWasmNameInfo = NonNullable<AetherRuntimeIntrospection["wasmInternalNames"]>;
+
+function aetherDebugReadWasmU32(bytes: Uint8Array, cursor: { offset: number }, limit: number): number {
+  let value = 0;
+  let shift = 0;
+  for (let count = 0; count < 5; count += 1) {
+    if (cursor.offset >= limit) throw new Error("WASM name section 的 LEB128 数值越界。");
+    const byte = bytes[cursor.offset++];
+    value += (byte & 0x7f) * (2 ** shift);
+    if ((byte & 0x80) === 0) return value;
+    shift += 7;
+  }
+  throw new Error("WASM name section 的 LEB128 数值过长。");
+}
+
+function aetherDebugReadWasmName(bytes: Uint8Array, cursor: { offset: number }, limit: number): string {
+  const length = aetherDebugReadWasmU32(bytes, cursor, limit);
+  if (length > limit - cursor.offset) throw new Error("WASM name section 的字符串越界。");
+  const value = new TextDecoder("utf-8").decode(bytes.subarray(cursor.offset, cursor.offset + length));
+  cursor.offset += length;
+  return value;
+}
+
+function aetherDebugInspectWasmInternalNames(): AetherDebugWasmNameInfo {
+  const wasmModule = aetherDebugCapturedWasmModule;
+  if (!wasmModule || typeof WebAssembly === "undefined" || typeof WebAssembly.Module.customSections !== "function") {
+    return {
+      available: false, nameSectionCount: 0, nameSectionBytes: 0,
+      functionNameCount: 0, namedFunctions: [], truncated: false, debugSections: [],
+      notes: ["当前实例未捕获到 WebAssembly.Module，无法读取内部名称区；本探针未调用任何未知函数。"],
+    };
+  }
+
+  const debugSectionNames = ["name", "sourceMappingURL", "external_debug_info", "producers", "linking", "dylink.0", "target_features"];
+  const debugSections = debugSectionNames.map((name) => {
+    try {
+      const sections = WebAssembly.Module.customSections(wasmModule, name);
+      return { name, count: sections.length, bytes: sections.reduce((total, section) => total + section.byteLength, 0) };
+    } catch {
+      return { name, count: 0, bytes: 0 };
+    }
+  }).filter((item) => item.count > 0);
+
+  let nameSections: ArrayBuffer[];
+  try {
+    nameSections = WebAssembly.Module.customSections(wasmModule, "name");
+  } catch (cause) {
+    return {
+      available: true, nameSectionCount: 0, nameSectionBytes: 0,
+      functionNameCount: 0, namedFunctions: [], truncated: false, debugSections,
+      notes: [`读取 WASM name section 失败：${cause instanceof Error ? cause.message : String(cause)}`],
+    };
+  }
+
+  const MAX_FUNCTION_NAMES = 3000;
+  const namedFunctions: Array<{ index: number; name: string }> = [];
+  const notes: string[] = [];
+  let moduleName: string | undefined;
+  let functionNameCount = 0;
+  let nameSectionBytes = 0;
+  let truncated = false;
+
+  for (const buffer of nameSections) {
+    const bytes = new Uint8Array(buffer);
+    nameSectionBytes += bytes.byteLength;
+    const outer = { offset: 0 };
+    try {
+      while (outer.offset < bytes.byteLength) {
+        const subsectionId = bytes[outer.offset++];
+        const subsectionSize = aetherDebugReadWasmU32(bytes, outer, bytes.byteLength);
+        const subsectionStart = outer.offset;
+        const subsectionEnd = subsectionStart + subsectionSize;
+        if (subsectionEnd > bytes.byteLength) throw new Error("WASM 名称子区段长度越界。");
+
+        if (subsectionId === 0) {
+          const cursor = { offset: subsectionStart };
+          moduleName = aetherDebugReadWasmName(bytes, cursor, subsectionEnd);
+        } else if (subsectionId === 1) {
+          const cursor = { offset: subsectionStart };
+          const count = aetherDebugReadWasmU32(bytes, cursor, subsectionEnd);
+          functionNameCount += count;
+          const remaining = Math.max(0, MAX_FUNCTION_NAMES - namedFunctions.length);
+          const take = Math.min(count, remaining);
+          for (let item = 0; item < take; item += 1) {
+            const index = aetherDebugReadWasmU32(bytes, cursor, subsectionEnd);
+            const name = aetherDebugReadWasmName(bytes, cursor, subsectionEnd);
+            namedFunctions.push({ index, name });
+          }
+          if (count > take) truncated = true;
+        }
+        outer.offset = subsectionEnd;
+      }
+    } catch (cause) {
+      notes.push(`名称区段解析不完整：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  if (nameSections.length === 0) {
+    notes.push("该 WASM 没有可读取的 name 自定义区段；因此不能单靠内部名称映射函数编号，需要进一步做二进制指令分析。 ");
+  } else if (functionNameCount === 0) {
+    notes.push("存在 name 区段，但没有函数名称子区段；可能只保留了模块名等有限调试信息。 ");
+  } else {
+    notes.push("内部函数名只是静态分析线索，不代表它们可通过 Module.ccall 直接调用，也不代表参数约定已经确定。 ");
+  }
+  if (truncated) notes.push(`函数名输出限制为 ${MAX_FUNCTION_NAMES} 项；完整名称数量为 ${functionNameCount}。`);
+
+  return {
+    available: true,
+    ...(moduleName ? { moduleName } : {}),
+    nameSectionCount: nameSections.length,
+    nameSectionBytes,
+    functionNameCount,
+    namedFunctions,
+    truncated,
+    debugSections,
+    notes,
+  };
+}
+
 function aetherDebugInspectRuntimeSurface(): AetherRuntimeIntrospection {
   const module = (activeModule ?? runtimeModule) as unknown as Record<string, unknown> | undefined;
   const moduleMemory = typeof WebAssembly !== "undefined" && module?.wasmMemory instanceof WebAssembly.Memory
     ? module.wasmMemory
     : undefined;
-  return inspectWasmRuntimeSurface(
+  const summary = inspectWasmRuntimeSurface(
     module,
     aetherDebugCapturedWasmExports,
     aetherDebugCapturedWasmImports,
     aetherDebugGetMemoryBuffer()?.byteLength ?? 0,
     aetherDebugCapturedMemory ? aetherDebugMemorySource : (moduleMemory ? "Module.wasmMemory" : "未捕获"),
   );
+  summary.wasmInternalNames = aetherDebugInspectWasmInternalNames();
+  return summary;
 }
 
 function aetherDebugMetadataAssetPaths(): string[] {

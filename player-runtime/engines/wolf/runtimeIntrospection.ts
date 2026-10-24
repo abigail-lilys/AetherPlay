@@ -25,6 +25,17 @@ export interface AetherRuntimeIntrospection {
   scalarValues: Array<{ name: string; value: string | number | boolean | null }>;
   memoryBytes: number;
   memorySource: string;
+  wasmInternalNames?: {
+    available: boolean;
+    moduleName?: string;
+    nameSectionCount: number;
+    nameSectionBytes: number;
+    functionNameCount: number;
+    namedFunctions: Array<{ index: number; name: string }>;
+    truncated: boolean;
+    debugSections: Array<{ name: string; count: number; bytes: number }>;
+    notes: string[];
+  };
   notes: string[];
 }
 
