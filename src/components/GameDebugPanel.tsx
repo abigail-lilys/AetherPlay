@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -23,6 +23,9 @@ interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; v
 interface DebugWolfVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
 interface DebugWolfVariableBaseCandidate { base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }
 interface DebugWolfVariableBaseDetection { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugWolfVariableBaseCandidate[] }
+interface DebugSysVariableCandidate { base: number; signatureAddress: number }
+interface DebugSysVariableBaseDetection { startIndex: number; variableCount: number; signatureValues: number[]; memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugSysVariableCandidate[] }
+interface DebugSysVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
 interface DebugWolfVariableWriteResult { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number }
 interface DebugWolfVariableChange { id: number; before: number; after: number; delta: number }
 interface DebugWolfVariableWatchResult { base: number; count: number; startedAt?: string; endedAt?: string; durationMs?: number; changes?: DebugWolfVariableChange[]; totalChanges?: number }
@@ -75,6 +78,8 @@ interface DebugResponse {
   wolfVariableBaseDetection?: DebugWolfVariableBaseDetection;
   wolfVariableWrite?: DebugWolfVariableWriteResult;
   wolfVariableWatch?: DebugWolfVariableWatchResult;
+  sysVariables?: DebugSysVariableRange;
+  sysVariableBaseDetection?: DebugSysVariableBaseDetection;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -83,7 +88,7 @@ interface DebugResponse {
   wasmBinaryBytes?: number;
   wasmBinaryCaptureStatus?: string;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; variableId?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; variableId?: number; sysStartIndex?: number; sysVariableBase?: number; sysVariableCount?: number; sysSignatureValues?: number[]; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -199,6 +204,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfV18SignatureText, setWolfV18SignatureText] = useState("-1");
   const [wolfV19SignatureText, setWolfV19SignatureText] = useState("57");
   const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
+  // AETHER_WOLF_SYS_BASE_DETECT_V1: read-only Sys numeric table locator; no write path is exposed.
+  const [sysVariableStartIndexText, setSysVariableStartIndexText] = useState("0");
+  const [sysVariableCountText, setSysVariableCountText] = useState("135");
+  const [sysSignatureTexts, setSysSignatureTexts] = useState<string[]>(["", "", "", ""]);
+  const [sysVariableBaseDetection, setSysVariableBaseDetection] = useState<DebugSysVariableBaseDetection | null>(null);
+  const [sysVariableRange, setSysVariableRange] = useState<DebugSysVariableRange | null>(null);
 
   // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
   const [projectVariableNames, setProjectVariableNames] = useState<Record<number, string>>({});
@@ -275,7 +286,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" || command === "wolf-variable-base-detect" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" || command === "wolf-variable-base-detect" || command === "sys-variable-base-detect" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -856,6 +867,66 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
+  const applyDetectedSysVariableBase = async (
+    candidate: DebugSysVariableCandidate,
+    startIndex: number,
+    signatureValues: number[],
+    count: number,
+  ) => {
+    setBusy("已发现 Sys 候选基址，正在回读并验证特征…"); setError(""); setNotice("");
+    try {
+      const response = await request("sys-variable-range-read", { sysVariableBase: candidate.base, sysVariableCount: count });
+      const range = response.sysVariables;
+      if (!range) throw new Error("运行时没有返回 Sys 变量范围读取结果。");
+      for (let i = 0; i < signatureValues.length; i += 1) {
+        if (range.rows[startIndex + i]?.value !== signatureValues[i]) {
+          throw new Error(`Sys 候选复读失败：Sys${startIndex + i} 与扫描时的值不一致。游戏状态可能已改变；未采用此基址，请重新定位。`);
+        }
+      }
+      setSysVariableRange(range);
+      setNotice(`Sys 基址只读定位并复读成功：0x${range.base.toString(16).toUpperCase().padStart(8, "0")}；已读取 ${range.count} 项，${signatureValues.length} 个连续特征全部匹配。此结果尚不开放写入。`);
+    } catch (cause) {
+      setSysVariableRange(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
+  const detectSysVariableBase = async () => {
+    setError(""); setNotice(""); setSysVariableRange(null); setSysVariableBaseDetection(null);
+    const parseInteger = (raw: string, label: string, minimum: number, maximum: number) => {
+      if (raw.trim() === "") throw new Error(`${label}不能为空。`);
+      const value = Number(raw.trim());
+      if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${label}必须是 ${minimum} 至 ${maximum} 之间的整数。`);
+      return value;
+    };
+    let startIndex: number, count: number, signatureValues: number[];
+    try {
+      startIndex = parseInteger(sysVariableStartIndexText, "Sys 起始编号", 0, 255);
+      count = parseInteger(sysVariableCountText, "Sys 变量数量", 1, 256);
+      if (sysSignatureTexts.length < 4 || sysSignatureTexts.length > 8) throw new Error("请提供 4 至 8 个连续 Sys 变量的特征值。");
+      signatureValues = sysSignatureTexts.map((raw, index) => parseInteger(raw, `Sys${startIndex + index} 当前值`, -2147483648, 2147483647));
+      if (startIndex + signatureValues.length > count) throw new Error("特征值数量超出 Sys 变量数量。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause)); return;
+    }
+    setBusy("正在只读扫描当前 WASM 内存，搜索连续 Sys 特征…");
+    try {
+      const response = await request("sys-variable-base-detect", { sysStartIndex: startIndex, sysVariableCount: count, sysSignatureValues: signatureValues });
+      const detection = response.sysVariableBaseDetection;
+      if (!detection) throw new Error("运行时没有返回 Sys 基址定位结果。");
+      setSysVariableBaseDetection(detection);
+      if (detection.candidateCount === 1 && detection.candidates.length === 1 && !detection.truncated) {
+        await applyDetectedSysVariableBase(detection.candidates[0], startIndex, signatureValues, count);
+      } else if (detection.candidateCount === 0) {
+        setNotice("没有找到匹配的 Sys 连续特征。请确认起始编号和四个连续变量的当前值；可用变量目录核对名称，并用“定位试验”确认某个 Sys 变量的真实值后重试。没有修改内存。");
+      } else {
+        setNotice(`发现 ${detection.candidateCount} 个 Sys 候选基址。为避免误选，未自动采用；请逐个选择并复读特征。扫描只读，不会写入。`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const readWolfVariableRange = async () => {
     setError(""); setNotice("");
     let base: number;
@@ -1017,6 +1088,8 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const response = await request("variable-catalog");
       if (!response.variableCatalog) throw new Error("运行时没有返回 WOLF 变量目录。");
       setVariableCatalog(response.variableCatalog);
+      const sysNumericGroup = response.variableCatalog.groups.find((group) => group.id === "system-number");
+      if (sysNumericGroup?.count) setSysVariableCountText(String(sysNumericGroup.count));
       setNotice(`变量目录已读取：${response.variableCatalog.totalVariables.toLocaleString()} 个目录项，${response.variableCatalog.groups.length} 个类别。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1280,6 +1353,60 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
 
         {tab === "variables" ? (
           <>
+            <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 750 }}>Sys 系统数值变量：动态基址定位（只读）</div>
+              <div style={{ ...subtleStyle, marginTop: 6, lineHeight: 1.6 }}>
+                此阶段只验证 Sys 数值表是否为连续的小端 Int32 区域，不开放写入。先点击下方“读取游戏变量表”，从“系统变量 Sys”组确认连续编号及名称；再填写这几个 Sys 变量在当前游戏里的实际整数值。只有候选被重新读取且所有特征都匹配，才显示已验证范围。
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginTop: 10 }}>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>特征起始编号
+                  <input value={sysVariableStartIndexText} inputMode="numeric" onChange={(event) => { setSysVariableStartIndexText(event.target.value); setSysVariableBaseDetection(null); setSysVariableRange(null); }} style={inputStyle} />
+                </label>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>Sys 总数量（优先取目录）
+                  <input value={sysVariableCountText} inputMode="numeric" onChange={(event) => { setSysVariableCountText(event.target.value); setSysVariableBaseDetection(null); setSysVariableRange(null); }} style={inputStyle} />
+                </label>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
+                {sysSignatureTexts.map((value, index) => {
+                  const start = Number(sysVariableStartIndexText);
+                  const id = Number.isSafeInteger(start) && start >= 0 ? start + index : index;
+                  const entry = variableCatalog?.groups.find((group) => group.id === "system-number")?.variables[id];
+                  return <label key={index} style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>
+                    {`Sys${id}${entry?.name ? ` · ${entry.name}` : ""} 当前值`}
+                    <input value={value} inputMode="decimal" onChange={(event) => { setSysSignatureTexts((old) => old.map((item, i) => i === index ? event.target.value : item)); setSysVariableBaseDetection(null); setSysVariableRange(null); }} placeholder="游戏中已确认的 Int32" style={inputStyle} />
+                  </label>;
+                })}
+              </div>
+              <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void detectSysVariableBase()} style={{ ...buttonStyle, width: "100%", marginTop: 10, background: "#204b40", borderColor: "#397c66" }}>
+                {busy.includes("连续 Sys 特征") ? "扫描中…" : "扫描并定位 Sys 基址"}
+              </button>
+              {sysVariableBaseDetection ? <div style={{ ...subtleStyle, marginTop: 9, lineHeight: 1.6 }}>扫描 {formatBytes(sysVariableBaseDetection.scannedBytes)} / {formatBytes(sysVariableBaseDetection.memoryBytes)} · 候选 {sysVariableBaseDetection.candidateCount}{sysVariableBaseDetection.truncated ? "（结果超过 100，列表截断）" : ""} · 特征值 [{sysVariableBaseDetection.signatureValues.join(", ")}]。</div> : null}
+              {sysVariableBaseDetection && sysVariableBaseDetection.candidateCount > 1 ? sysVariableBaseDetection.candidates.map((candidate, index) => (
+                <div key={`${candidate.base}:${index}`} style={{ marginTop: 8, padding: 9, border: "1px solid #354258", borderRadius: 8 }}>
+                  <div style={{ fontSize: 12 }}>候选 Sys 基址 <code>0x{candidate.base.toString(16).toUpperCase().padStart(8, "0")}</code></div>
+                  <div style={{ ...subtleStyle, marginTop: 4 }}>特征起始地址 0x{candidate.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</div>
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void applyDetectedSysVariableBase(candidate, sysVariableBaseDetection.startIndex, sysVariableBaseDetection.signatureValues, sysVariableBaseDetection.variableCount)} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>采用此候选并复读验证</button>
+                </div>
+              )) : null}
+              {sysVariableRange ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>已验证的 Sys 数值范围 · 只读</div>
+                  <div style={{ ...subtleStyle, marginTop: 4 }}>基址 0x{sysVariableRange.base.toString(16).toUpperCase().padStart(8, "0")} · {sysVariableRange.count} 项 · 内存 {formatBytes(sysVariableRange.memoryBytes)}</div>
+                  <div style={{ marginTop: 8, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
+                    {sysVariableRange.rows.map((row) => {
+                      const entry = variableCatalog?.groups.find((group) => group.id === "system-number")?.variables[row.id];
+                      return <div key={row.id} style={{ padding: "7px 9px", borderBottom: "1px solid #202b3a", background: "#0f1722" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                          <strong style={{ fontSize: 12 }}>Sys{row.id}{entry?.name ? ` · ${entry.name}` : ""}</strong>
+                          <code style={{ fontSize: 10, color: "#9eacc1" }}>0x{row.address.toString(16).toUpperCase().padStart(8, "0")}</code>
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 700, marginTop: 3 }}>{row.value}</div>
+                      </div>;
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </section>
             <section style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>WOLF 运行时变量表（单变量安全写入）</div>
               <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>

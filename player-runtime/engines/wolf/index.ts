@@ -30,6 +30,7 @@ import type { WolfPlayerSettings } from "@/player-runtime/engines/wolf/compatibi
 import { createWasmMemoryScanner, type WasmScanFilter, type WasmScanType } from "@/player-runtime/engines/wolf/memoryScanner";
 import { resolveWolfHpPointerChain, writeWolfHpPointerChain, type WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { buildWolfVariableCatalog, type WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
+import { matchesInt32Sequence } from "@/player-runtime/engines/wolf/sysVariableLocator";
 import { inspectWasmRuntimeSurface, summarizeWasmExports, summarizeWasmImports, type AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 
 declare const Module: WolfRuntimeModule;
@@ -62,7 +63,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -84,6 +85,10 @@ type AetherDebugCommand = {
   v16Value?: number;
   v18Value?: number;
   v19Value?: number;
+  sysStartIndex?: number;
+  sysVariableBase?: number;
+  sysVariableCount?: number;
+  sysSignatureValues?: number[];
   variableId?: number;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
@@ -109,6 +114,8 @@ type AetherDebugResponse = {
   wolfVariableBaseDetection?: { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: Array<{ base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }> };
   wolfVariableWrite?: { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number };
   wolfVariableWatch?: { base: number; count: number; startedAt: string; endedAt?: string; durationMs?: number; changes?: Array<{ id: number; before: number; after: number; delta: number }>; totalChanges?: number };
+  sysVariables?: { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> };
+  sysVariableBaseDetection?: { startIndex: number; variableCount: number; signatureValues: number[]; memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: Array<{ base: number; signatureAddress: number }> };
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -705,7 +712,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "wolf-variable-watch-start" && command !== "wolf-variable-watch-stop" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "wolf-variable-watch-start" && command !== "wolf-variable-watch-stop" && command !== "sys-variable-base-detect" && command !== "sys-variable-range-read" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
     if (command === "wasm-binary-export") {
       const bytes = aetherDebugCapturedWasmBytes;
@@ -800,6 +807,79 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       aetherDebugRespond({
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
         command, ok: true, wolfVariables: { base, count, memoryBytes: buffer.byteLength, rows },
+      });
+      return;
+    }
+    // AETHER_WOLF_SYS_BASE_DETECT_V1: read-only locator for a contiguous Sys Int32 table.
+    if (command === "sys-variable-range-read") {
+      const base = Number(message.sysVariableBase);
+      const count = Number(message.sysVariableCount);
+      if (!Number.isSafeInteger(base) || base < 0 || base > 0xffffffff || base % 4 !== 0) {
+        throw new Error("Sys 候选基址必须是 4 字节对齐的非负 WASM32 地址。");
+      }
+      if (!Number.isSafeInteger(count) || count < 1 || count > 256) {
+        throw new Error("Sys 变量数量必须是 1 至 256 之间的整数。请先读取 SysDataBase.project 获取实际数量。");
+      }
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer || buffer.byteLength <= 0) throw new Error("当前 WASM 内存不可读；请等待游戏初始化后重试。");
+      const end = base + count * 4;
+      if (!Number.isSafeInteger(end) || end > buffer.byteLength) {
+        throw new Error(`Sys 候选范围超出当前 WASM 内存：基址 0x${base.toString(16).toUpperCase()}，数量 ${count}。未读取。`);
+      }
+      const view = new DataView(buffer);
+      const rows = Array.from({ length: count }, (_, id) => ({ id, address: base + id * 4, value: view.getInt32(base + id * 4, true) }));
+      if (aetherDebugGetMemoryBuffer() !== buffer) throw new Error("读取 Sys 变量期间 WASM 内存发生变化；请重新定位。");
+      aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, sysVariables: { base, count, memoryBytes: buffer.byteLength, rows } });
+      return;
+    }
+    if (command === "sys-variable-base-detect") {
+      const startIndex = Number(message.sysStartIndex);
+      const variableCount = Number(message.sysVariableCount);
+      const signatureValues = message.sysSignatureValues;
+      if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex > 255) {
+        throw new Error("Sys 连续特征的起始编号必须是 0 至 255 的整数。");
+      }
+      if (!Number.isSafeInteger(variableCount) || variableCount < 1 || variableCount > 256) {
+        throw new Error("Sys 数量必须是 1 至 256 的整数；建议先读取静态变量目录。");
+      }
+      if (!Array.isArray(signatureValues) || signatureValues.length < 4 || signatureValues.length > 8) {
+        throw new Error("定位特征必须是 4 至 8 个相邻 Sys 变量的当前数值。");
+      }
+      if (signatureValues.some((value) => typeof value !== "number" || !Number.isInteger(value) || value < -2147483648 || value > 2147483647)) {
+        throw new Error("连续特征里的每个值都必须是有效的 Int32 整数。");
+      }
+      if (startIndex + signatureValues.length > variableCount) {
+        throw new Error("特征范围超出 Sys 变量数量，请检查起始编号、特征长度与 Sys 数量。");
+      }
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer || buffer.byteLength < signatureValues.length * 4) throw new Error("当前 WASM 内存不可用或过小。");
+      const memoryBytes = buffer.byteLength;
+      const chunkBytes = 2 * 1024 * 1024;
+      const startByteOffset = startIndex * 4;
+      const signatureBytes = signatureValues.length * 4;
+      const candidates: Array<{ base: number; signatureAddress: number }> = [];
+      let candidateCount = 0;
+      for (let chunkStart = 0; chunkStart < memoryBytes; chunkStart += chunkBytes) {
+        const currentBuffer = aetherDebugGetMemoryBuffer();
+        if (!currentBuffer || currentBuffer !== buffer) throw new Error("扫描期间 WASM 内存发生变化（例如内存增长）；本次 Sys 定位已中止，请重新扫描。");
+        const view = new DataView(currentBuffer);
+        const chunkEnd = Math.min(chunkStart + chunkBytes, memoryBytes);
+        for (let signatureAddress = Math.max(chunkStart, startByteOffset); signatureAddress + signatureBytes <= memoryBytes && signatureAddress < chunkEnd; signatureAddress += 4) {
+          const base = signatureAddress - startByteOffset;
+          const end = base + variableCount * 4;
+          if (base < 0 || base % 4 !== 0 || !Number.isSafeInteger(end) || end > memoryBytes) continue;
+          if (!matchesInt32Sequence(view, signatureAddress, signatureValues)) continue;
+          candidateCount += 1;
+          if (candidates.length < 100) candidates.push({ base, signatureAddress });
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      const finalBuffer = aetherDebugGetMemoryBuffer();
+      if (!finalBuffer || finalBuffer !== buffer) throw new Error("扫描结束前 WASM 内存发生变化；本次 Sys 定位结果作废，请重新扫描。");
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        sysVariableBaseDetection: { startIndex, variableCount, signatureValues, memoryBytes, scannedBytes: memoryBytes, candidateCount, truncated: candidateCount > candidates.length, candidates },
       });
       return;
     }
