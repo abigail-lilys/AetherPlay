@@ -199,38 +199,56 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfV18SignatureText, setWolfV18SignatureText] = useState("-1");
   const [wolfV19SignatureText, setWolfV19SignatureText] = useState("57");
   const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
-  // AETHER_WOLF_VARIABLE_CATALOG_BRIDGE_V1: names parsed from SysDataBase.project / CommonEvent.dat, keyed by V id.
-  const [projectVariableNames, setProjectVariableNames] = useState<Record<number, string>>({});
-  // AETHER_WOLF_VARIABLE_CATALOG_BRIDGE_V1: pure extractor, no assumptions about group layout beyond common shapes.
-  useEffect(() => {
-    if (!variableCatalog) { setProjectVariableNames({}); return; }
-    const next: Record<number, string> = {};
-    const catalog: any = variableCatalog;
-    const groups: any[] = Array.isArray(catalog.groups) ? catalog.groups
-      : Array.isArray(catalog.categories) ? catalog.categories
-      : Array.isArray(catalog.entries) ? catalog.entries : [];
-    for (const group of groups) {
-      const label = String(group.label ?? group.name ?? group.title ?? "");
-      const isNumericVariableGroup = /常规变量|通常変数|预备变量|予備変数/i.test(label) || group.category === "V" || group.id === "V";
-      if (!isNumericVariableGroup) continue;
-      const items: any[] = Array.isArray(group.variables) ? group.variables
-        : Array.isArray(group.entries) ? group.entries : [];
-      for (const item of items) {
-        const id = Number(item.id ?? item.index ?? item.number);
-        const name = String(item.name ?? item.label ?? item.title ?? "").trim();
-        if (Number.isSafeInteger(id) && id >= 0 && id < 36 && name) next[id] = name;
-      }
-    }
-    setProjectVariableNames(next);
-  }, [variableCatalog]);
 
   // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
   const [wolfVariableWatchStartedAt, setWolfVariableWatchStartedAt] = useState<string | null>(null);
   const [wolfVariableWatchChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
   const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
-  const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>(() => readUserVariableLabels()[gameId] ?? {});
+  const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>({});
+  // AETHER_WOLF_VARIABLE_BRIDGE_V3: Fix stale state when gameId becomes available later.
+  useEffect(() => {
+    if (gameId) {
+      setWolfUserLabels(readUserVariableLabels()[gameId] ?? {});
+    }
+  }, [gameId]);
   const [wolfLabelDrafts, setWolfLabelDrafts] = useState<Record<number, string>>({});
   const getWolfLabel = (id: number): string | undefined => wolfUserLabels[id] ?? projectVariableNames[id] ?? WOLF_RUNTIME_VARIABLE_LABELS[id];
+  // AETHER_WOLF_VARIABLE_BRIDGE_V3: Deep-walk to find anything that looks like a variable name.
+  useEffect(() => {
+    if (!variableCatalog) { setProjectVariableNames({}); return; }
+    const next: Record<number, string> = {};
+    const seen = new WeakSet<object>();
+    
+    // 暴力递归寻找 { id: number, name: string } 的组合
+    const walk = (node: any) => {
+      if (!node || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      
+      // 尝试提取可能的名字
+      const idCandidate = node.id ?? node.index ?? node.number ?? node.variableId ?? node.v;
+      const nameCandidate = node.name ?? node.label ?? node.title ?? node.displayName ?? node.text;
+      
+      if (idCandidate !== undefined && nameCandidate !== undefined) {
+        const id = Number(idCandidate);
+        const name = String(nameCandidate).trim();
+        // 过滤掉无效名称
+        if (Number.isSafeInteger(id) && id >= 0 && id <= 64 && name && name.length < 60 && !/^\d+$/u.test(name)) {
+          if (!next[id]) next[id] = name;
+        }
+      }
+      
+      // 继续深潜
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+      } else {
+        Object.values(node).forEach(child => {
+          if (child && typeof child === "object") walk(child);
+        });
+      }
+    };
+    walk(variableCatalog);
+    setProjectVariableNames(next);
+  }, [variableCatalog]);
   // AETHER_WOLF_RUNTIME_VARIABLE_DIFF_V1: compare snapshots from the same live game instance.
   const [wolfVariableBaseline, setWolfVariableBaseline] = useState<{ gameId: string; range: DebugWolfVariableRange; capturedAt: string } | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
@@ -1385,6 +1403,16 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                 </>
               ) : <div style={{ ...subtleStyle, marginTop: 8 }}>尚未读取。默认只读取当前内存，不修改数值。</div>}
             </section>
+            <details style={{ marginBottom: 12, fontSize: 12, color: "#9eacc1", background: "#111a27", padding: 10, borderRadius: 10, border: "1px solid #253247" }}>
+              <summary style={{ cursor: "pointer" }}>🔍 调试：查看提取的变量名与原始目录结构</summary>
+              <pre style={{ background: "#000", padding: 10, overflow: "auto", maxHeight: 200, marginTop: 8 }}>
+                提取到的变量名：{JSON.stringify(projectVariableNames, null, 2)}
+
+
+                原始 variableCatalog 前 1000 字符：
+{JSON.stringify(variableCatalog).slice(0, 1000)}
+              </pre>
+            </details>
             <WolfVariableCatalogView
               catalog={variableCatalog}
               loading={Boolean(busy)}
