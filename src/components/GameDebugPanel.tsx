@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -21,6 +21,8 @@ interface DebugNeighborhoodWord { offset: number; offsetHex: string; hex: string
 interface DebugNeighborhoodSnapshot { capturedAt: string; anchorOffset: number; anchorHex: string; radiusBytes: number; memoryBytes: number; words: DebugNeighborhoodWord[] }
 interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
 interface DebugWolfVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
+interface DebugWolfVariableBaseCandidate { base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }
+interface DebugWolfVariableBaseDetection { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugWolfVariableBaseCandidate[] }
 
 interface DebugEntry {
   name: string;
@@ -67,6 +69,7 @@ interface DebugResponse {
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
   wolfVariables?: DebugWolfVariableRange;
+  wolfVariableBaseDetection?: DebugWolfVariableBaseDetection;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -75,7 +78,7 @@ interface DebugResponse {
   wasmBinaryBytes?: number;
   wasmBinaryCaptureStatus?: string;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -161,6 +164,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableBaseText, setWolfVariableBaseText] = useState("0x03CECBC8");
   const [wolfVariableCountText, setWolfVariableCountText] = useState("65");
   const [wolfVariableRange, setWolfVariableRange] = useState<DebugWolfVariableRange | null>(null);
+  // AETHER_WOLF_VARIABLE_BASE_DETECT_V1: known signature values may be edited for the current game state.
+  const [wolfV17AnchorValueText, setWolfV17AnchorValueText] = useState("");
+  const [wolfV16SignatureText, setWolfV16SignatureText] = useState("0");
+  const [wolfV18SignatureText, setWolfV18SignatureText] = useState("-1");
+  const [wolfV19SignatureText, setWolfV19SignatureText] = useState("57");
+  const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
   // AETHER_WOLF_RUNTIME_VARIABLE_DIFF_V1: compare snapshots from the same live game instance.
   const [wolfVariableBaseline, setWolfVariableBaseline] = useState<{ gameId: string; range: DebugWolfVariableRange; capturedAt: string } | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
@@ -182,7 +191,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" || command === "wolf-variable-base-detect" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -663,6 +672,71 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  const applyWolfDetectedBase = async (candidate: DebugWolfVariableBaseCandidate) => {
+    let count: number;
+    try {
+      count = Number(wolfVariableCountText.trim());
+      if (!Number.isSafeInteger(count) || count < 1 || count > 256) throw new Error("读取数量必须是 1 至 256 的整数。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    const baseText = `0x${candidate.base.toString(16).toUpperCase().padStart(8, "0")}`;
+    setWolfVariableBaseText(baseText);
+    setWolfVariableRange(null);
+    setBusy("已找到变量基址，正在立即复读变量范围…"); setError(""); setNotice("");
+    try {
+      const response = await request("wolf-variable-range-read", { variableBase: candidate.base, variableCount: count });
+      if (!response.wolfVariables) throw new Error("运行时没有返回基址复核结果。");
+      const anchors = new Map(response.wolfVariables.rows.map((row) => [row.id, row.value] as [number, number]));
+      if (anchors.get(16) !== candidate.values.v16 || anchors.get(17) !== candidate.values.v17 || anchors.get(18) !== candidate.values.v18 || anchors.get(19) !== candidate.values.v19) {
+        throw new Error("候选基址复读时 V16–V19 与扫描签名不一致；可能发生了游戏状态变化。未将本次读取标记为有效，请重新定位。");
+      }
+      setWolfVariableRange(response.wolfVariables);
+      setNotice(`基址定位并复核成功：${baseText}；V16=${candidate.values.v16}、V17=${candidate.values.v17}、V18=${candidate.values.v18}、V19=${candidate.values.v19}。当前实例已读取 ${count} 项。`);
+    } catch (cause) {
+      setWolfVariableRange(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
+  const detectWolfVariableBase = async () => {
+    setError(""); setNotice(""); setWolfVariableBaseDetection(null);
+    const parseInt32 = (raw: string, label: string): number => {
+      if (raw.trim() === "") throw new Error(`${label}不能为空。`);
+      const value = Number(raw.trim());
+      if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) throw new Error(`${label}必须是有效的 Int32 整数。`);
+      return value;
+    };
+    let anchorValue: number, v16Value: number, v18Value: number, v19Value: number;
+    try {
+      anchorValue = parseInt32(wolfV17AnchorValueText, "当前 V17 / 游戏内所持金");
+      v16Value = parseInt32(wolfV16SignatureText, "V16 特征值");
+      v18Value = parseInt32(wolfV18SignatureText, "V18 特征值");
+      v19Value = parseInt32(wolfV19SignatureText, "V19 特征值");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    setBusy("正在只读扫描当前 WASM 内存，搜索 V16–V19 特征…");
+    try {
+      const response = await request("wolf-variable-base-detect", { anchorValue, v16Value, v18Value, v19Value });
+      const detection = response.wolfVariableBaseDetection;
+      if (!detection) throw new Error("运行时没有返回变量基址搜索结果。");
+      setWolfVariableBaseDetection(detection);
+      const onlyCandidate = detection.candidates[0];
+      if (detection.candidateCount === 1 && detection.candidates.length === 1 && onlyCandidate) {
+        await applyWolfDetectedBase(onlyCandidate);
+      } else if (detection.candidateCount === 0) {
+        setNotice("没有匹配的 V16–V19 特征。请确认输入的是当前游戏显示的金钱，且 V16/V18/V19 特征值与当前游戏状态一致；没有自动选择任何地址。");
+      } else {
+        setNotice(`发现 ${detection.candidateCount} 个匹配候选。为避免误选，未自动采用；请根据候选的地址与特征值选择一个，再复读校验。`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const readWolfVariableRange = async () => {
     setError(""); setNotice("");
     let base: number;
@@ -1026,6 +1100,35 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
               <div style={{ fontSize: 15, fontWeight: 700 }}>WOLF 运行时变量表（只读验证）</div>
               <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
                 按候选基址 + V 编号 × 4，读取小端 Int32。默认基址 0x03CECBC8 是从当前样本的 V17=0x03CECC0C 反推的候选值，不是自动发现结果；换游戏或重新载入后请重新确认。此面板只读，不提供批量写入。
+              </div>
+              <div style={{ marginTop: 10, padding: 11, border: "1px solid #354258", borderRadius: 10, background: "#0f1722" }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>自动定位变量基址（只读扫描）</div>
+                <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.55 }}>输入游戏当前显示的所持金，并核对 V16、V18、V19 当前值。工具在当前 WASM 内存中搜索连续签名 [V16, V17, V18, V19]，唯一匹配才自动采用；多个候选需要手动选择。扫描过程不会写入游戏内存。</div>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 9 }}>当前所持金（V17）
+                  <input value={wolfV17AnchorValueText} inputMode="numeric" onChange={(event) => setWolfV17AnchorValueText(event.target.value)} placeholder="填写游戏当前显示的金钱，例如 1459" style={inputStyle} />
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 8 }}>
+                  <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V16
+                    <input value={wolfV16SignatureText} inputMode="numeric" onChange={(event) => setWolfV16SignatureText(event.target.value)} style={inputStyle} />
+                  </label>
+                  <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V18
+                    <input value={wolfV18SignatureText} inputMode="numeric" onChange={(event) => setWolfV18SignatureText(event.target.value)} style={inputStyle} />
+                  </label>
+                  <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V19
+                    <input value={wolfV19SignatureText} inputMode="numeric" onChange={(event) => setWolfV19SignatureText(event.target.value)} style={inputStyle} />
+                  </label>
+                </div>
+                <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void detectWolfVariableBase()} style={{ ...buttonStyle, width: "100%", marginTop: 10, background: "#204b40", borderColor: "#397c66" }}>
+                  {busy.includes("只读扫描当前 WASM 内存") ? "扫描中…" : "自动定位变量基址"}
+                </button>
+                {wolfVariableBaseDetection ? <div style={{ ...subtleStyle, marginTop: 8, lineHeight: 1.6 }}>扫描范围 {formatBytes(wolfVariableBaseDetection.scannedBytes)} / 内存 {formatBytes(wolfVariableBaseDetection.memoryBytes)} · 匹配 {wolfVariableBaseDetection.candidateCount} 个候选{wolfVariableBaseDetection.truncated ? "（候选过多，仅显示前 100 个）" : ""}。</div> : null}
+                {wolfVariableBaseDetection && wolfVariableBaseDetection.candidateCount > 1 ? wolfVariableBaseDetection.candidates.map((candidate, index) => (
+                  <div key={`${candidate.base}:${index}`} style={{ marginTop: 8, padding: 9, border: "1px solid #354258", borderRadius: 8 }}>
+                    <div style={{ fontSize: 12, overflowWrap: "anywhere" }}>V0 基址 <code>0x{candidate.base.toString(16).toUpperCase().padStart(8, "0")}</code></div>
+                    <div style={{ ...subtleStyle, marginTop: 4 }}>V17 地址 0x{candidate.slotAddress.toString(16).toUpperCase().padStart(8, "0")} · 签名 {candidate.values.v16}, {candidate.values.v17}, {candidate.values.v18}, {candidate.values.v19}</div>
+                    <button type="button" disabled={Boolean(busy)} onClick={() => void applyWolfDetectedBase(candidate)} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>采用此基址并复读验证</button>
+                  </div>
+                )) : null}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 0.8fr)", gap: 8, marginTop: 10 }}>
                 <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V0 候选基址
