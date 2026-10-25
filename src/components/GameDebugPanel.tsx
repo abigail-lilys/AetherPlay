@@ -161,6 +161,8 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableBaseText, setWolfVariableBaseText] = useState("0x03CECBC8");
   const [wolfVariableCountText, setWolfVariableCountText] = useState("65");
   const [wolfVariableRange, setWolfVariableRange] = useState<DebugWolfVariableRange | null>(null);
+  // AETHER_WOLF_RUNTIME_VARIABLE_DIFF_V1: compare snapshots from the same live game instance.
+  const [wolfVariableBaseline, setWolfVariableBaseline] = useState<{ gameId: string; range: DebugWolfVariableRange; capturedAt: string } | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
   // Read-only validation for a user-supplied, known WOLF variable address.
   const [directAddressText, setDirectAddressText] = useState("0x0795c0b0");
@@ -696,10 +698,25 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  const captureWolfVariableBaseline = () => {
+    if (!wolfVariableRange) return;
+    setWolfVariableBaseline({ gameId, range: wolfVariableRange, capturedAt: new Date().toISOString() });
+    setNotice(`已保存对比基线：${wolfVariableRange.count} 项。请保持同一游戏运行实例，回到游戏中正常改变所持金等变量，再点击“读取 V0–V64”比较变化。`);
+    setError("");
+  };
+
+  const clearWolfVariableBaseline = () => {
+    setWolfVariableBaseline(null);
+    setNotice("已清除变量对比基线。重新读取后可重新设定基线。");
+  };
+
   const exportWolfVariableRange = async () => {
     if (!wolfVariableRange) return;
     setBusy("正在导出 WOLF 变量表 JSON…"); setError("");
     try {
+      const baselineMatches = Boolean(wolfVariableRange && wolfVariableBaseline && wolfVariableBaseline.gameId === gameId && wolfVariableBaseline.range.base === wolfVariableRange.base && wolfVariableBaseline.range.count === wolfVariableRange.count && wolfVariableBaseline.range.rows.length === wolfVariableRange.rows.length);
+      const baselineById = new Map<number, number>((baselineMatches ? wolfVariableBaseline!.range.rows : []).map((row) => [row.id, row.value] as [number, number]));
+      const differences = baselineMatches ? wolfVariableRange.rows.flatMap((row) => { const before = baselineById.get(row.id); return before !== undefined && before !== row.value ? [{ id: row.id, address: row.address, before, after: row.value, delta: row.value - before }] : []; }) : null;
       const report = {
         format: "aetherplay-wolf-runtime-variable-range",
         schemaVersion: 1,
@@ -715,11 +732,15 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
           ...row,
           addressHex: `0x${row.address.toString(16).toUpperCase().padStart(8, "0")}`,
           knownLabel: WOLF_RUNTIME_VARIABLE_LABELS[row.id] || null,
+          baselineValue: baselineMatches ? baselineById.get(row.id) ?? null : null,
+          changedSinceBaseline: baselineMatches ? baselineById.get(row.id) !== row.value : null,
         })),
+        comparison: { available: baselineMatches, baselineCapturedAt: baselineMatches ? wolfVariableBaseline!.capturedAt : null, changedCount: differences?.length ?? null, differences },
         notes: [
           "此报告来自用户输入的当前实例候选基址；工具只读，不修改任何变量。",
           "基址 0x03CECBC8 是由已知 V17 地址反推的候选值，不保证跨游戏或重新载入后保持不变。",
           "每项按 4 字节小端 Int32 解读；需要与游戏内变量值交叉核对后才能确认布局。",
+          "快照差异仅在同一游戏运行实例、相同基址和相同数量下比较；重载/重启游戏后请清除并重新采集基线。",
         ],
       };
       const filename = `AetherPlay-WOLF-Variables-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
@@ -926,6 +947,10 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     ? neighborhoodSnapshot!.words.filter((word) => neighborhoodBaseline!.words.find((prior) => prior.offset === word.offset)?.hex !== word.hex)
     : [];
 
+  const wolfVariableBaselineMatches = Boolean(wolfVariableRange && wolfVariableBaseline && wolfVariableBaseline.gameId === gameId && wolfVariableBaseline.range.base === wolfVariableRange.base && wolfVariableBaseline.range.count === wolfVariableRange.count && wolfVariableBaseline.range.rows.length === wolfVariableRange.rows.length);
+  const wolfVariableBaselineValues = new Map<number, number>((wolfVariableBaselineMatches ? wolfVariableBaseline!.range.rows : []).map((row) => [row.id, row.value] as [number, number]));
+  const wolfVariableChanges = wolfVariableBaselineMatches && wolfVariableRange ? wolfVariableRange.rows.filter((row) => wolfVariableBaselineValues.get(row.id) !== row.value) : [];
+
   const tabButton = (value: DebugTab, label: string) => (
     <button key={value} type="button" onClick={() => { setTab(value); setError(""); }}
       style={{ ...buttonStyle, flex: 1, background: tab === value ? "#28528a" : "#182335", borderColor: tab === value ? "#5e9ce9" : "#354258" }}>
@@ -1018,16 +1043,25 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   <div style={{ ...subtleStyle, marginTop: 10, lineHeight: 1.6 }}>
                     基址 0x{wolfVariableRange.base.toString(16).toUpperCase().padStart(8, "0")} · {wolfVariableRange.count} 项 · 当前 WASM 内存 {formatBytes(wolfVariableRange.memoryBytes)}。V16–V19 是现有已知样本，其余编号仍需对照游戏验证。
                   </div>
-                  <button type="button" disabled={Boolean(busy)} onClick={() => void exportWolfVariableRange()} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>导出读取结果 JSON</button>
-                  <div style={{ marginTop: 10, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginTop: 8 }}>
+                <button type="button" disabled={Boolean(busy) || !wolfVariableRange} onClick={captureWolfVariableBaseline} style={{ ...buttonStyle, width: "100%", background: "#204b40", borderColor: "#397c66" }}>设为对比基线</button>
+                <button type="button" disabled={Boolean(busy) || !wolfVariableBaseline} onClick={clearWolfVariableBaseline} style={{ ...buttonStyle, width: "100%" }}>清除基线</button>
+              </div>
+              <button type="button" disabled={Boolean(busy) || !wolfVariableRange} onClick={() => void exportWolfVariableRange()} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>导出读取结果与差异 JSON</button>
+              {wolfVariableBaseline ? <div style={{ ...subtleStyle, marginTop: 8, lineHeight: 1.6 }}>基线：{new Date(wolfVariableBaseline.capturedAt).toLocaleTimeString()} · {wolfVariableBaselineMatches ? `已比较，${wolfVariableChanges.length} 项变化` : "基线与当前基址/数量不匹配，或属于其他游戏；请重新设基线"}。若已重载/重新启动游戏，务必清除旧基线后再采集。</div> : null}
+              <div style={{ marginTop: 10, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
                     {wolfVariableRange.rows.map((row) => {
                       const label = WOLF_RUNTIME_VARIABLE_LABELS[row.id];
-                      return <div key={row.id} style={{ padding: "8px 10px", borderBottom: "1px solid #202b3a", background: label ? "#172437" : "#0f1722" }}>
+                      const hasBaseline = wolfVariableBaselineMatches && wolfVariableBaselineValues.has(row.id);
+                      const baselineValue = hasBaseline ? wolfVariableBaselineValues.get(row.id) : undefined;
+                      const changed = hasBaseline && baselineValue !== row.value;
+                      return <div key={row.id} style={{ padding: "8px 10px", borderBottom: "1px solid #202b3a", background: changed ? "#392a1b" : label ? "#172437" : "#0f1722" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
                           <strong style={{ fontSize: 13, color: label ? "#b8d5ff" : "#edf3fc" }}>V{row.id}{label ? ` · ${label}` : ""}</strong>
                           <code style={{ fontSize: 11, color: "#9eacc1" }}>0x{row.address.toString(16).toUpperCase().padStart(8, "0")}</code>
                         </div>
-                        <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{row.value}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums", color: changed ? "#ffd28a" : "#edf3fc" }}>{row.value}</div>
+                        {hasBaseline ? <div style={{ ...subtleStyle, marginTop: 3, color: changed ? "#ffd28a" : "#9eacc1" }}>{changed ? `基线 ${baselineValue} → 当前 ${row.value}（变化 ${row.value - (baselineValue as number) > 0 ? "+" : ""}${row.value - (baselineValue as number)}）` : "与基线一致"}</div> : null}
                       </div>;
                     })}
                   </div>
