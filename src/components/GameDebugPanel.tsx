@@ -7,7 +7,7 @@ import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/h
 import { buildWolfReadbackReportHtml, buildWolfReadbackReportJson, type NewWolfReadbackRecord, type WolfReadbackRecord } from "@/src/lib/wolfReadbackReport";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "sys-time-feature-scan" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -27,6 +27,11 @@ interface DebugWolfVariableBaseDetection { memoryBytes: number; scannedBytes: nu
 interface DebugSysVariableCandidate { base: number; signatureAddress: number }
 interface DebugSysVariableBaseDetection { startIndex: number; variableCount: number; signatureValues: number[]; memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugSysVariableCandidate[] }
 interface DebugSysVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
+interface DebugSysTimeTriple { frames: number; seconds: number; milliseconds: number }
+interface DebugSysTimeProgress { frameDelta: number; secondsDelta: number; millisecondsDelta: number; clockElapsedMs: number; elapsedMs: number; approximateFps: number; clockErrorMs: number }
+interface DebugSysTimeCandidate { base: number; signatureAddress: number; before: DebugSysTimeTriple; after?: DebugSysTimeTriple; elapsedMs?: number; progress?: DebugSysTimeProgress }
+interface DebugSysTimeSample extends DebugSysTimeCandidate { after: DebugSysTimeTriple; elapsedMs: number; matched: boolean }
+interface DebugSysTimeFeatureScan { phase: "baseline" | "compare" | "reset"; memoryBytes: number; scannedBytes: number; baselineCandidateCount: number; candidateCount: number; examinedCount?: number; truncated: boolean; scanDurationMs?: number; candidates: DebugSysTimeCandidate[]; samples?: DebugSysTimeSample[] }
 interface DebugWolfVariableWriteResult { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number }
 interface DebugWolfVariableChange { id: number; before: number; after: number; delta: number }
 interface DebugWolfVariableWatchResult { base: number; count: number; startedAt?: string; endedAt?: string; durationMs?: number; changes?: DebugWolfVariableChange[]; totalChanges?: number }
@@ -81,6 +86,7 @@ interface DebugResponse {
   wolfVariableWatch?: DebugWolfVariableWatchResult;
   sysVariables?: DebugSysVariableRange;
   sysVariableBaseDetection?: DebugSysVariableBaseDetection;
+  sysTimeFeatureScan?: DebugSysTimeFeatureScan;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -89,7 +95,7 @@ interface DebugResponse {
   wasmBinaryBytes?: number;
   wasmBinaryCaptureStatus?: string;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; variableId?: number; sysStartIndex?: number; sysVariableBase?: number; sysVariableCount?: number; sysSignatureValues?: number[]; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; variableId?: number; sysStartIndex?: number; sysVariableBase?: number; sysVariableCount?: number; sysSignatureValues?: number[]; sysTimePhase?: "baseline" | "compare" | "reset"; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -211,6 +217,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [sysSignatureTexts, setSysSignatureTexts] = useState<string[]>(["", "", "", ""]);
   const [sysVariableBaseDetection, setSysVariableBaseDetection] = useState<DebugSysVariableBaseDetection | null>(null);
   const [sysVariableRange, setSysVariableRange] = useState<DebugSysVariableRange | null>(null);
+  const [sysTimeFeatureScan, setSysTimeFeatureScan] = useState<DebugSysTimeFeatureScan | null>(null);
   // AETHERPLAY_WOLF_READBACK_VISUAL_V2: keep per-instance candidate readback evidence for visual export.
   const [readbackRecords, setReadbackRecords] = useState<WolfReadbackRecord[]>([]);
   const [visibleGameValueText, setVisibleGameValueText] = useState("");
@@ -299,7 +306,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       const timeout = window.setTimeout(() => {
         pending.current.delete(requestId);
         reject(new Error("游戏运行时没有响应。请确认游戏已启动，再重试。"));
-      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" || command === "wolf-variable-base-detect" || command === "sys-variable-base-detect" ? 180000 : 8000);
+      }, command === "scan-first" || command === "scan-unknown-first" || command === "scan-next" || command === "variable-catalog" || command === "address-trace" || command === "wasm-binary-export" || command === "wolf-variable-base-detect" || command === "sys-variable-base-detect" || command === "sys-time-feature-scan" ? 180000 : 8000);
       pending.current.set(requestId, { resolve, reject, timeout });
       try {
         target.postMessage({
@@ -995,6 +1002,29 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
+  const runSysTimeFeatureScan = async (phase: "baseline" | "compare") => {
+    setError(""); setNotice("");
+    setBusy(phase === "baseline" ? "正在扫描全量 WASM 内存，寻找 Sys28–Sys30 时间特征…" : "正在复查时间特征候选…");
+    try {
+      const response = await request("sys-time-feature-scan", { sysTimePhase: phase });
+      const result = response.sysTimeFeatureScan;
+      if (!result) throw new Error("运行时没有返回 Sys 时间特征扫描结果。");
+      setSysTimeFeatureScan(result);
+      if (phase === "baseline") {
+        setNotice(result.candidateCount > 0
+          ? `初筛找到 ${result.candidateCount} 个可能的 Sys28/29/30 连续三元组。保持游戏继续运行约 2–3 秒，再点击“比较时间变化”；这还不是已确认的 Sys 基址。`
+          : "没有找到符合初筛条件的连续时间三元组。请确保游戏实际运行且已运行超过一秒，再重新采集；这也可能意味着时间变量并非连续 Int32 存储。没有修改内存。");
+      } else {
+        setNotice(result.candidateCount > 0
+          ? `有 ${result.candidateCount} 个候选同时满足帧增量、秒/毫秒变化与实际间隔检查。它们只是待验证候选，尚未确认 Sys 基址。`
+          : "没有候选同时通过时间差分检查。初筛位置可能是普通数据，或游戏在基线期间没有持续运行；请重新采集并在游戏活动时比较。没有修改内存。");
+      }
+    } catch (cause) {
+      setSysTimeFeatureScan(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const readWolfVariableRange = async () => {
     setError(""); setNotice("");
     let base: number;
@@ -1487,6 +1517,42 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                 <input value={visibleGameValueText} inputMode="numeric" onChange={(event) => setVisibleGameValueText(event.target.value)} placeholder="例如 1459" style={inputStyle} />
               </label>
               <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void scanVisibleGameValue()} style={{ ...buttonStyle, width: "100%", marginTop: 9, background: "#204b40", borderColor: "#397c66" }}>精确搜索该数值（只读）</button>
+            </section>
+            <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 750 }}>Sys28–Sys30 时间特征扫描（只读实验）</div>
+              <div style={{ ...subtleStyle, marginTop: 6, lineHeight: 1.6 }}>
+                官方变量含义是 Sys28=游戏开始后的帧数（1000 万回绕）、Sys29=游玩秒数、Sys30=游玩毫秒值（通常 0–999，帧边界可短暂超过 1000）。本实验只检验“连续三个 Int32 + 随时间变化”的假设，不写入内存，也不保证游戏一定采用连续表布局。请在游戏实际运行超过一秒后先采集基线，再等待约 2–3 秒比较。
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
+                <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void runSysTimeFeatureScan("baseline")} style={{ ...buttonStyle, width: "100%", background: "#204b40", borderColor: "#397c66" }}>
+                  采集时间特征基线
+                </button>
+                <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable || !sysTimeFeatureScan || sysTimeFeatureScan.phase !== "baseline" || sysTimeFeatureScan.baselineCandidateCount === 0} onClick={() => void runSysTimeFeatureScan("compare")} style={{ ...buttonStyle, width: "100%" }}>
+                  比较时间变化
+                </button>
+              </div>
+              {sysTimeFeatureScan ? <div style={{ marginTop: 10, border: "1px solid #253247", borderRadius: 9, padding: 10, background: "#0f1722" }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>
+                  {sysTimeFeatureScan.phase === "baseline" ? "基线初筛结果" : "时间差分结果"}
+                </div>
+                <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.7 }}>
+                  已扫描 {formatBytes(sysTimeFeatureScan.scannedBytes)} / {formatBytes(sysTimeFeatureScan.memoryBytes)} · 初筛候选 {sysTimeFeatureScan.baselineCandidateCount} · {sysTimeFeatureScan.phase === "baseline" ? "待复查" : `通过差分 ${sysTimeFeatureScan.candidateCount} / 检查 ${sysTimeFeatureScan.examinedCount ?? 0}`} {sysTimeFeatureScan.truncated ? "· 候选已截断（最多保存前 5000 个）" : ""}
+                </div>
+                {sysTimeFeatureScan.phase === "baseline" ? sysTimeFeatureScan.candidates.slice(0, 12).map((candidate, index) => <div key={`${candidate.signatureAddress}:${index}`} style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6 }}>
+                  <code>推算 Sys0 基址 0x{candidate.base.toString(16).toUpperCase().padStart(8, "0")}</code> · 三元组地址 <code>0x{candidate.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</code> · [{candidate.before.frames}, {candidate.before.seconds}, {candidate.before.milliseconds}]
+                </div>) : null}
+                {sysTimeFeatureScan.phase === "compare" && sysTimeFeatureScan.candidates.length > 0 ? sysTimeFeatureScan.candidates.slice(0, 50).map((candidate, index) => <div key={`${candidate.signatureAddress}:${index}`} style={{ marginTop: 7, paddingTop: 7, borderTop: "1px solid #253247", fontSize: 11, lineHeight: 1.7 }}>
+                  <div><strong>候选基址</strong> <code>0x{candidate.base.toString(16).toUpperCase().padStart(8, "0")}</code> · Sys28 地址 <code>0x{candidate.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</code></div>
+                  <div>[{candidate.before.frames}, {candidate.before.seconds}, {candidate.before.milliseconds}] → [{candidate.after?.frames}, {candidate.after?.seconds}, {candidate.after?.milliseconds}]</div>
+                  <div>Δ帧={candidate.progress?.frameDelta} · Δ秒={candidate.progress?.secondsDelta} · Δ毫秒={candidate.progress?.millisecondsDelta} · 估算 FPS={candidate.progress?.approximateFps.toFixed(1)} · 时钟误差={candidate.progress?.clockErrorMs.toFixed(0)}ms</div>
+                </div>) : null}
+                {sysTimeFeatureScan.phase === "compare" && sysTimeFeatureScan.candidateCount === 0 && sysTimeFeatureScan.samples?.length ? <div style={{ marginTop: 7, lineHeight: 1.7, fontSize: 11 }}>
+                  <div style={{ fontWeight: 700 }}>差分样本（未通过验证，仅用于诊断）</div>
+                  {sysTimeFeatureScan.samples.slice(0, 6).map((sample, index) => <div key={`${sample.signatureAddress}:${index}`} style={{ marginTop: 5 }}>
+                    <code>0x{sample.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</code> [{sample.before.frames}, {sample.before.seconds}, {sample.before.milliseconds}] → [{sample.after.frames}, {sample.after.seconds}, {sample.after.milliseconds}], 间隔 {sample.elapsedMs.toFixed(0)}ms
+                  </div>)}
+                </div> : null}
+              </div> : null}
             </section>
             <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 15, fontWeight: 750 }}>Sys 系统数值变量：动态基址定位（只读）</div>
