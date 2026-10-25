@@ -988,7 +988,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
           ...row,
           addressHex: `0x${row.address.toString(16).toUpperCase().padStart(8, "0")}`,
           knownLabel: getWolfLabel(row.id) || null,
-          knownLabelSource: wolfUserLabels[row.id] ? "user" : (WOLF_RUNTIME_VARIABLE_LABELS[row.id] ? "builtin" : null),
+          knownLabelSource: wolfUserLabels[row.id] ? "user" : (projectVariableNames[row.id] ? "project" : (WOLF_RUNTIME_VARIABLE_LABELS[row.id] ? "builtin" : null)),
           baselineValue: baselineMatches ? baselineById.get(row.id) ?? null : null,
           changedSinceBaseline: baselineMatches ? baselineById.get(row.id) !== row.value : null,
         })),
