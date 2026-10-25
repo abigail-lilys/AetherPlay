@@ -51,13 +51,16 @@ const config = (window as typeof window & {
 const runtimeModule = (window as typeof window & { Module?: WolfRuntimeModule }).Module ?? Module;
 let activeModule: WolfRuntimeModule | undefined;
 let externalSaveRootRegistered = false;
+// AETHER_WOLF_VARIABLE_WRITE_V1: a write is allowed only after this runtime instance completed signature detection + range verification.
+let aetherDebugWolfVariableBaseCandidates = new Map<number, { base: number; buffer: ArrayBufferLike; values: { v16: number; v17: number; v18: number; v19: number } }>();
+let aetherDebugConfirmedWolfVariableBase: { base: number; count: number; buffer: ArrayBufferLike; gameId: string } | undefined;
 
 // AetherPlay WOLF debug bridge. This snippet is inserted after activeModule is declared.
 type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -79,6 +82,7 @@ type AetherDebugCommand = {
   v16Value?: number;
   v18Value?: number;
   v19Value?: number;
+  variableId?: number;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -101,6 +105,7 @@ type AetherDebugResponse = {
   variableCatalog?: WolfVariableCatalog;
   wolfVariables?: { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> };
   wolfVariableBaseDetection?: { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: Array<{ base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }> };
+  wolfVariableWrite?: { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number };
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -697,7 +702,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
     if (command === "wasm-binary-export") {
       const bytes = aetherDebugCapturedWasmBytes;
@@ -782,6 +787,13 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
         const address = base + id * 4;
         return { id, address, value: view.getInt32(address, true) };
       });
+      // AETHER_WOLF_VARIABLE_WRITE_V1: authorize only a scanned candidate whose signature still matches.
+      const detected = aetherDebugWolfVariableBaseCandidates.get(base);
+      if (detected && detected.buffer === buffer && count === 65 &&
+          rows[16]?.value === detected.values.v16 && rows[17]?.value === detected.values.v17 &&
+          rows[18]?.value === detected.values.v18 && rows[19]?.value === detected.values.v19) {
+        aetherDebugConfirmedWolfVariableBase = { base, count, buffer, gameId: message.gameId };
+      }
       aetherDebugRespond({
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
         command, ok: true, wolfVariables: { base, count, memoryBytes: buffer.byteLength, rows },
@@ -790,6 +802,9 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
     }
     // AETHER_WOLF_VARIABLE_BASE_DETECT_V1: scan for the confirmed V16-V19 signature; read-only only.
     if (command === "wolf-variable-base-detect") {
+      // AETHER_WOLF_VARIABLE_WRITE_V1: a new scan invalidates any previous write authorization.
+      aetherDebugWolfVariableBaseCandidates.clear();
+      aetherDebugConfirmedWolfVariableBase = undefined;
       const anchorValue = Number(message.anchorValue);
       const v16Value = Number(message.v16Value);
       const v18Value = Number(message.v18Value);
@@ -827,6 +842,14 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
         }
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
+      const finalBuffer = aetherDebugGetMemoryBuffer();
+      if (!finalBuffer || finalBuffer !== buffer) {
+        aetherDebugWolfVariableBaseCandidates.clear();
+        throw new Error("扫描结束前 WASM 内存发生变化；本次扫描结果未授权写入，请重新定位。");
+      }
+      for (const candidate of candidates) {
+        aetherDebugWolfVariableBaseCandidates.set(candidate.base, { ...candidate, buffer });
+      }
       aetherDebugRespond({
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
         command, ok: true,
@@ -834,6 +857,60 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
           memoryBytes, scannedBytes: memoryBytes, candidateCount,
           truncated: candidateCount > candidates.length, candidates,
         },
+      });
+      return;
+    }
+    // AETHER_WOLF_VARIABLE_WRITE_V1: one guarded Int32 write at a time, limited to V0..V64.
+    if (command === "wolf-variable-write") {
+      const variableId = Number(message.variableId);
+      const base = Number(message.variableBase);
+      const count = Number(message.variableCount);
+      const expectedValue = message.expectedValue;
+      const requestedValue = message.value;
+      if (!Number.isSafeInteger(variableId) || variableId < 0 || variableId > 64) {
+        throw new Error("单变量写入只允许 V0–V64；变量编号必须是 0 至 64 的整数。");
+      }
+      if (!Number.isSafeInteger(base) || base < 0 || base > 0xffffffff || base % 4 !== 0) {
+        throw new Error("变量基址无效；必须是 4 字节对齐的 WASM32 地址。");
+      }
+      if (count !== 65 || variableId >= count) {
+        throw new Error("写入只允许已验证的 V0–V64 范围（数量必须为 65），不支持批量写入或未知边界。");
+      }
+      if (typeof expectedValue !== "number" || !Number.isInteger(expectedValue) || expectedValue < -2147483648 || expectedValue > 2147483647) {
+        throw new Error("缺少有效的 expectedValue（预期旧 Int32）；拒绝无旧值校验的写入。");
+      }
+      if (typeof requestedValue !== "number" || !Number.isInteger(requestedValue) || requestedValue < -2147483648 || requestedValue > 2147483647) {
+        throw new Error("新值必须是 -2147483648 至 2147483647 之间的 Int32 整数。");
+      }
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer || buffer.byteLength <= 0) throw new Error("当前 WASM 内存不可用；请重新探测并重新定位变量基址。");
+      const proof = aetherDebugConfirmedWolfVariableBase;
+      if (!proof || proof.gameId !== message.gameId || proof.base !== base || proof.count !== count || proof.buffer !== buffer) {
+        throw new Error("当前基址没有通过本游戏运行实例的签名扫描与范围复读验证，或 WASM 内存已变化。请重新自动定位并复读变量表后再写入。");
+      }
+      const end = base + count * 4;
+      const address = base + variableId * 4;
+      if (!Number.isSafeInteger(end) || end > buffer.byteLength || !Number.isSafeInteger(address) || address % 4 !== 0 || address < base || address + 4 > end || address + 4 > buffer.byteLength) {
+        throw new Error("变量地址超出当前 WASM 内存范围；已拒绝写入。");
+      }
+      const view = new DataView(buffer);
+      const before = view.getInt32(address, true);
+      if (before !== expectedValue) {
+        throw new Error(`拒绝过期写入：V${variableId} 当前值为 ${before}，界面预期旧值为 ${expectedValue}。请重新读取变量表后再试。`);
+      }
+      view.setInt32(address, requestedValue, true);
+      const currentBuffer = aetherDebugGetMemoryBuffer();
+      if (!currentBuffer || currentBuffer !== buffer) {
+        throw new Error("写入后 WASM 内存对象发生变化；无法安全确认结果。请重新定位并读取变量。");
+      }
+      const immediateValue = new DataView(currentBuffer).getInt32(address, true);
+      if (immediateValue !== requestedValue) {
+        throw new Error(`写入后立即回读不一致：请求 ${requestedValue}，实际 ${immediateValue}。未报告写入成功。`);
+      }
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        wolfVariableWrite: { variableId, base, address, expectedValue, requestedValue, immediateValue, memoryBytes: currentBuffer.byteLength },
       });
       return;
     }

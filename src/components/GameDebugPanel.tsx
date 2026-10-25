@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -23,6 +23,7 @@ interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; v
 interface DebugWolfVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
 interface DebugWolfVariableBaseCandidate { base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }
 interface DebugWolfVariableBaseDetection { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugWolfVariableBaseCandidate[] }
+interface DebugWolfVariableWriteResult { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number }
 
 interface DebugEntry {
   name: string;
@@ -70,6 +71,7 @@ interface DebugResponse {
   variableCatalog?: WolfVariableCatalog;
   wolfVariables?: DebugWolfVariableRange;
   wolfVariableBaseDetection?: DebugWolfVariableBaseDetection;
+  wolfVariableWrite?: DebugWolfVariableWriteResult;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -78,7 +80,7 @@ interface DebugResponse {
   wasmBinaryBytes?: number;
   wasmBinaryCaptureStatus?: string;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; anchorValue?: number; v16Value?: number; v18Value?: number; v19Value?: number; variableId?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -164,6 +166,8 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableBaseText, setWolfVariableBaseText] = useState("0x03CECBC8");
   const [wolfVariableCountText, setWolfVariableCountText] = useState("65");
   const [wolfVariableRange, setWolfVariableRange] = useState<DebugWolfVariableRange | null>(null);
+  // AETHER_WOLF_VARIABLE_WRITE_V1: draft values are per-row; the baseline snapshot is intentionally not mutated by writes.
+  const [wolfVariableEditValues, setWolfVariableEditValues] = useState<Record<number, string>>({});
   // AETHER_WOLF_VARIABLE_BASE_DETECT_V1: known signature values may be edited for the current game state.
   const [wolfV17AnchorValueText, setWolfV17AnchorValueText] = useState("");
   const [wolfV16SignatureText, setWolfV16SignatureText] = useState("0");
@@ -772,6 +776,69 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  // AETHER_WOLF_VARIABLE_WRITE_V1: guarded one-row write plus delayed overwrite detection.
+  const writeWolfVariable = async (row: DebugWolfVariableRange["rows"][number]) => {
+    if (!wolfVariableRange || wolfVariableRange.count !== 65 || row.id < 0 || row.id > 64) {
+      setError("请先自动定位并复读验证完整的 V0–V64 变量表。");
+      return;
+    }
+    const candidateExists = Boolean(wolfVariableBaseDetection?.candidates.some((candidate) => candidate.base === wolfVariableRange.base));
+    if (!candidateExists) {
+      setError("当前变量表没有对应本次自动定位的候选基址。请重新自动定位并复读变量表后再写入。");
+      return;
+    }
+    const raw = (wolfVariableEditValues[row.id] ?? "").trim();
+    if (!raw) { setError(`请先输入 V${row.id} 的新 Int32 值。`); return; }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+      setError("新值必须是 -2147483648 至 2147483647 之间的 Int32 整数。");
+      return;
+    }
+    const label = WOLF_RUNTIME_VARIABLE_LABELS[row.id] ? ` · ${WOLF_RUNTIME_VARIABLE_LABELS[row.id]}` : "";
+    const expectedValue = row.value;
+    if (!window.confirm(`单变量写入确认\n\nV${row.id}${label}\n地址：0x${row.address.toString(16).toUpperCase().padStart(8, "0")}\n预期旧值：${expectedValue}\n新值：${value}\n\n运行时会再次核对旧值，立即回读，并在 500ms 后复查。只写这一项，不批量修改。继续吗？`)) return;
+    setBusy(`正在校验并写入 V${row.id}…`); setError(""); setNotice("");
+    try {
+      const response = await request("wolf-variable-write", {
+        variableBase: wolfVariableRange.base,
+        variableCount: wolfVariableRange.count,
+        variableId: row.id,
+        expectedValue,
+        value,
+      });
+      const writeResult = response.wolfVariableWrite;
+      if (!writeResult) throw new Error("运行时没有返回写入校验结果。");
+      if (writeResult.variableId !== row.id || writeResult.address !== row.address || writeResult.immediateValue !== value) {
+        throw new Error("写入回执与请求不一致；请重新读取变量表检查当前值。");
+      }
+      setWolfVariableRange((current) => current ? {
+        ...current,
+        memoryBytes: writeResult.memoryBytes,
+        rows: current.rows.map((item) => item.id === row.id ? { ...item, value: writeResult.immediateValue } : item),
+      } : current);
+      setWolfVariableEditValues((current) => ({ ...current, [row.id]: "" }));
+      setNotice(`V${row.id} 写入后立即回读成功：${expectedValue} → ${writeResult.immediateValue}。正在 500ms 后复查是否被游戏逻辑覆盖…`);
+      setBusy(`V${row.id} 已立即验证，正在延迟复查…`);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
+      try {
+        const refreshed = await request("wolf-variable-range-read", { variableBase: writeResult.base, variableCount: wolfVariableRange.count });
+        if (!refreshed.wolfVariables) throw new Error("延迟复查没有返回变量表。");
+        setWolfVariableRange(refreshed.wolfVariables);
+        const delayedValue = refreshed.wolfVariables.rows.find((item) => item.id === row.id)?.value;
+        if (delayedValue === undefined) throw new Error("延迟复查结果缺少目标变量。");
+        if (delayedValue === value) {
+          setNotice(`写入验证通过：V${row.id} 立即回读=${writeResult.immediateValue}，500ms 后=${delayedValue}；未观察到游戏覆盖。原对比基线已保留。`);
+        } else {
+          setNotice(`写入操作立即回读成功，但游戏在 500ms 内改变/覆盖了 V${row.id}：请求=${value}，延迟复查=${delayedValue}。当前快照已更新，原对比基线保留。`);
+        }
+      } catch (cause) {
+        setError(`V${row.id} 写入后立即回读成功（${writeResult.immediateValue}），但延迟复查失败：${cause instanceof Error ? cause.message : String(cause)}。请重新读取变量表确认最终值。`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const captureWolfVariableBaseline = () => {
     if (!wolfVariableRange) return;
     setWolfVariableBaseline({ gameId, range: wolfVariableRange, capturedAt: new Date().toISOString() });
@@ -1097,9 +1164,9 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         {tab === "variables" ? (
           <>
             <section style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14, marginBottom: 12 }}>
-              <div style={{ fontSize: 15, fontWeight: 700 }}>WOLF 运行时变量表（只读验证）</div>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>WOLF 运行时变量表（单变量安全写入）</div>
               <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
-                按候选基址 + V 编号 × 4，读取小端 Int32。默认基址 0x03CECBC8 是从当前样本的 V17=0x03CECC0C 反推的候选值，不是自动发现结果；换游戏或重新载入后请重新确认。此面板只读，不提供批量写入。
+                按候选基址 + V 编号 × 4 读取小端 Int32。只有当前实例的自动定位候选经过范围复读验证后，才允许对 V0–V64 单项写入。写入必须匹配预期旧值，立即回读，并在 500ms 后检查是否被游戏逻辑覆盖；不提供批量写入。
               </div>
               <div style={{ marginTop: 10, padding: 11, border: "1px solid #354258", borderRadius: 10, background: "#0f1722" }}>
                 <div style={{ fontSize: 14, fontWeight: 700 }}>自动定位变量基址（只读扫描）</div>
@@ -1165,6 +1232,12 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                         </div>
                         <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums", color: changed ? "#ffd28a" : "#edf3fc" }}>{row.value}</div>
                         {hasBaseline ? <div style={{ ...subtleStyle, marginTop: 3, color: changed ? "#ffd28a" : "#9eacc1" }}>{changed ? `基线 ${baselineValue} → 当前 ${row.value}（变化 ${row.value - (baselineValue as number) > 0 ? "+" : ""}${row.value - (baselineValue as number)}）` : "与基线一致"}</div> : null}
+                        {/* AETHER_WOLF_VARIABLE_WRITE_V1: intentionally no batch operation; each row has its own guarded write. */}
+                        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, marginTop: 8 }}>
+                          <input value={wolfVariableEditValues[row.id] ?? ""} inputMode="numeric" aria-label={`V${row.id} 新值`} placeholder="新 Int32 值" onChange={(event) => setWolfVariableEditValues((old) => ({ ...old, [row.id]: event.target.value }))} style={{ ...inputStyle, minWidth: 0, padding: "8px 9px" }} />
+                          <button type="button" disabled={Boolean(busy) || wolfVariableRange.count !== 65 || !wolfVariableBaseDetection?.candidates.some((candidate) => candidate.base === wolfVariableRange.base)} onClick={() => void writeWolfVariable(row)} style={{ ...buttonStyle, padding: "8px 10px", background: "#462b25", borderColor: "#875044" }}>写入此项</button>
+                        </div>
+                        <div style={{ ...subtleStyle, marginTop: 4 }}>写入前会核对本次显示的旧值 {row.value}；只写单项，立即回读并在 500ms 后复查。</div>
                       </div>;
                     })}
                   </div>
