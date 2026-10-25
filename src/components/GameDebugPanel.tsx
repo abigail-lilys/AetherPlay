@@ -201,7 +201,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
   // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
   const [wolfVariableWatchStartedAt, setWolfVariableWatchStartedAt] = useState<string | null>(null);
-  const [wolfVariableChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
+  const [wolfVariableWatchChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
   const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
   const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>(() => readUserVariableLabels()[gameId] ?? {});
   const [wolfLabelDrafts, setWolfLabelDrafts] = useState<Record<number, string>>({});
@@ -1288,15 +1288,15 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   </button>
                   <button type="button" disabled={Boolean(busy) || !wolfVariableWatchStartedAt} onClick={() => void stopWolfVariableWatch()} style={{ ...buttonStyle, width: "100%", background: "#204b40", borderColor: "#397c66" }}>结束追踪</button>
                 </div>
-                {wolfVariableChanges ? (
+                {wolfVariableWatchChanges ? (
                   <div style={{ marginTop: 10 }}>
-                    {wolfVariableChanges.length === 0 ? (
+                    {wolfVariableWatchChanges.length === 0 ? (
                       <div style={{ ...subtleStyle }}>
                         {wolfVariableWatchDurationMs !== null ? `追踪 ${(wolfVariableWatchDurationMs / 1000).toFixed(1)} 秒内没有变量发生变化。` : "追踪期间没有变量发生变化。"} 可能是动作太快、变量不在 V0–V64 范围，或游戏内存对象已变化。
                       </div>
                     ) : (
                       <div style={{ border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
-                        {wolfVariableChanges.map((change) => (
+                        {wolfVariableWatchChanges.map((change) => (
                           <div key={change.id} style={{ padding: "8px 10px", borderBottom: "1px solid #202b3a", background: "#2a1f14" }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
                               <strong style={{ color: "#ffd28a" }}>V{change.id}{getWolfLabel(change.id) ? ` · ${getWolfLabel(change.id)}` : ""}</strong>
