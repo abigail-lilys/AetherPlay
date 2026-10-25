@@ -205,6 +205,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableWatchChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
   const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
   const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>({});
+  const [projectVariableNames, setProjectVariableNames] = useState<Record<number, string>>({});
   // AETHER_WOLF_VARIABLE_BRIDGE_V3: Fix stale state when gameId becomes available later.
   useEffect(() => {
     if (gameId) {
