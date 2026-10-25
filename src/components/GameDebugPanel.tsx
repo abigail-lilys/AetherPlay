@@ -201,44 +201,26 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
 
   // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
-  const [wolfVariableWatchStartedAt, setWolfVariableWatchStartedAt] = useState<string | null>(null);
-  const [wolfVariableWatchChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
-  const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
-  const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>({});
   const [projectVariableNames, setProjectVariableNames] = useState<Record<number, string>>({});
-  // AETHER_WOLF_VARIABLE_BRIDGE_V3: Fix stale state when gameId becomes available later.
-  useEffect(() => {
-    if (gameId) {
-      setWolfUserLabels(readUserVariableLabels()[gameId] ?? {});
-    }
-  }, [gameId]);
-  const [wolfLabelDrafts, setWolfLabelDrafts] = useState<Record<number, string>>({});
-  const getWolfLabel = (id: number): string | undefined => wolfUserLabels[id] ?? projectVariableNames[id] ?? WOLF_RUNTIME_VARIABLE_LABELS[id];
-  // AETHER_WOLF_VARIABLE_BRIDGE_V3: Deep-walk to find anything that looks like a variable name.
+  // AETHER_WOLF_VARIABLE_BRIDGE_V4: Accurate V0..V64 name mapping from string IDs.
   useEffect(() => {
     if (!variableCatalog) { setProjectVariableNames({}); return; }
     const next: Record<number, string> = {};
-    const seen = new WeakSet<object>();
-    
-    // 暴力递归寻找 { id: number, name: string } 的组合
     const walk = (node: any) => {
-      if (!node || typeof node !== "object" || seen.has(node)) return;
-      seen.add(node);
-      
-      // 尝试提取可能的名字
-      const idCandidate = node.id ?? node.index ?? node.number ?? node.variableId ?? node.v;
-      const nameCandidate = node.name ?? node.label ?? node.title ?? node.displayName ?? node.text;
-      
-      if (idCandidate !== undefined && nameCandidate !== undefined) {
-        const id = Number(idCandidate);
-        const name = String(nameCandidate).trim();
-        // 过滤掉无效名称
-        if (Number.isSafeInteger(id) && id >= 0 && id <= 64 && name && name.length < 60 && !/^\d+$/u.test(name)) {
-          if (!next[id]) next[id] = name;
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node.variables)) {
+        for (const v of node.variables) {
+          const rawId = String(v.id ?? "");
+          const m = rawId.match(/^V(\d+)$/i);
+          if (m) {
+            const id = Number(m[1]);
+            const name = String(v.name ?? v.displayName ?? "").trim();
+            if (Number.isSafeInteger(id) && id >= 0 && id <= 64 && name) {
+              next[id] = name;
+            }
+          }
         }
       }
-      
-      // 继续深潜
       if (Array.isArray(node)) {
         node.forEach(walk);
       } else {
@@ -250,6 +232,28 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     walk(variableCatalog);
     setProjectVariableNames(next);
   }, [variableCatalog]);
+
+  const [wolfLabelDrafts, setWolfLabelDrafts] = useState<Record<number, string>>({});
+  
+  const getWolfLabel = (id: number): string | undefined => 
+    wolfUserLabels[id] ?? projectVariableNames[id] ?? WOLF_RUNTIME_VARIABLE_LABELS[id];
+
+  const saveWolfVariableLabel = (variableId: number) => {
+    const draft = (wolfLabelDrafts[variableId] ?? "").trim();
+    writeUserVariableLabel(gameId, variableId, draft);
+    setWolfUserLabels((old) => {
+      const next = { ...old };
+      if (draft) next[variableId] = draft; else delete next[variableId];
+      return next;
+    });
+    setWolfLabelDrafts((old) => { const next = { ...old }; delete next[variableId]; return next; });
+    setNotice(draft ? `已保存 V${variableId} 名称「${draft}」（本机）。` : `已清除 V${variableId} 的名称标注。`);
+  };
+
+  const [wolfVariableWatchStartedAt, setWolfVariableWatchStartedAt] = useState<string | null>(null);
+  const [wolfVariableWatchChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
+  const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
+  const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>({});
   // AETHER_WOLF_RUNTIME_VARIABLE_DIFF_V1: compare snapshots from the same live game instance.
   const [wolfVariableBaseline, setWolfVariableBaseline] = useState<{ gameId: string; range: DebugWolfVariableRange; capturedAt: string } | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
@@ -814,17 +818,6 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
-  const saveWolfVariableLabel = (variableId: number) => {
-    const draft = (wolfLabelDrafts[variableId] ?? "").trim();
-    writeUserVariableLabel(gameId, variableId, draft);
-    setWolfUserLabels((old) => {
-      const next = { ...old };
-      if (draft) next[variableId] = draft; else delete next[variableId];
-      return next;
-    });
-    setWolfLabelDrafts((old) => { const next = { ...old }; delete next[variableId]; return next; });
-    setNotice(draft ? `已保存 V${variableId} 名称「${draft}」（本机）。` : `已清除 V${variableId} 的名称标注。`);
-  };
 
   const detectWolfVariableBase = async () => {
     setError(""); setNotice(""); setWolfVariableBaseDetection(null);
