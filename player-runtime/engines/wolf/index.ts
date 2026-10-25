@@ -54,13 +54,15 @@ let externalSaveRootRegistered = false;
 // AETHER_WOLF_VARIABLE_WRITE_V1: a write is allowed only after this runtime instance completed signature detection + range verification.
 let aetherDebugWolfVariableBaseCandidates = new Map<number, { base: number; buffer: ArrayBufferLike; values: { v16: number; v17: number; v18: number; v19: number } }>();
 let aetherDebugConfirmedWolfVariableBase: { base: number; count: number; buffer: ArrayBufferLike; gameId: string } | undefined;
+// AETHER_WOLF_VARIABLE_TRACKER_V1: one in-memory watch snapshot per runtime instance; disappears when WASM buffer changes.
+let aetherDebugWolfVariableWatch: { base: number; count: number; buffer: ArrayBufferLike; gameId: string; startedAt: string; rows: Array<{ id: number; value: number }> } | undefined;
 
 // AetherPlay WOLF debug bridge. This snippet is inserted after activeModule is declared.
 type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -106,6 +108,7 @@ type AetherDebugResponse = {
   wolfVariables?: { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> };
   wolfVariableBaseDetection?: { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: Array<{ base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }> };
   wolfVariableWrite?: { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number };
+  wolfVariableWatch?: { base: number; count: number; startedAt: string; endedAt?: string; durationMs?: number; changes?: Array<{ id: number; before: number; after: number; delta: number }>; totalChanges?: number };
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -702,7 +705,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "wolf-variable-watch-start" && command !== "wolf-variable-watch-stop" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
     if (command === "wasm-binary-export") {
       const bytes = aetherDebugCapturedWasmBytes;
@@ -911,6 +914,52 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
         type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
         command, ok: true,
         wolfVariableWrite: { variableId, base, address, expectedValue, requestedValue, immediateValue, memoryBytes: currentBuffer.byteLength },
+      });
+      return;
+    }
+    // AETHER_WOLF_VARIABLE_TRACKER_V1: pure read. Diff two V0..V64 snapshots from the same live instance.
+    if (command === "wolf-variable-watch-start") {
+      const base = Number(message.variableBase);
+      const count = Number(message.variableCount);
+      if (!Number.isSafeInteger(base) || base < 0 || base > 0xffffffff || base % 4 !== 0) throw new Error("变量基址无效；必须是 4 字节对齐的 WASM32 地址。");
+      if (count !== 65) throw new Error("变量追踪只支持已验证的 V0–V64 范围（数量必须为 65）。");
+      const buffer = aetherDebugGetMemoryBuffer();
+      const proof = aetherDebugConfirmedWolfVariableBase;
+      if (!buffer || !proof || proof.base !== base || proof.count !== count || proof.buffer !== buffer || proof.gameId !== message.gameId) {
+        throw new Error("当前基址未通过本游戏实例的签名扫描与范围复读验证；请先自动定位并复读变量表。");
+      }
+      const view = new DataView(buffer);
+      const rows = Array.from({ length: count }, (_, id) => ({ id, value: view.getInt32(base + id * 4, true) }));
+      const startedAt = new Date().toISOString();
+      aetherDebugWolfVariableWatch = { base, count, buffer, gameId: message.gameId, startedAt, rows };
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        wolfVariableWatch: { base, count, startedAt },
+      });
+      return;
+    }
+    if (command === "wolf-variable-watch-stop") {
+      const watch = aetherDebugWolfVariableWatch;
+      if (!watch) throw new Error("没有正在进行的变量追踪；请先点击「开始追踪」。");
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer || buffer !== watch.buffer) {
+        aetherDebugWolfVariableWatch = undefined;
+        throw new Error("追踪期间 WASM 内存对象发生变化（可能重载或内存增长）；本次追踪结果已作废，请重新定位并重新追踪。");
+      }
+      const view = new DataView(buffer);
+      const changes: Array<{ id: number; before: number; after: number; delta: number }> = [];
+      for (const prev of watch.rows) {
+        const after = view.getInt32(watch.base + prev.id * 4, true);
+        if (after !== prev.value) changes.push({ id: prev.id, before: prev.value, after, delta: after - prev.value });
+      }
+      const endedAt = new Date().toISOString();
+      const durationMs = Date.now() - new Date(watch.startedAt).getTime();
+      aetherDebugWolfVariableWatch = undefined;
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        wolfVariableWatch: { base: watch.base, count: watch.count, startedAt: watch.startedAt, endedAt, durationMs, changes, totalChanges: changes.length },
       });
       return;
     }

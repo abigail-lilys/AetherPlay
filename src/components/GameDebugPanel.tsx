@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -24,6 +24,8 @@ interface DebugWolfVariableRange { base: number; count: number; memoryBytes: num
 interface DebugWolfVariableBaseCandidate { base: number; slotAddress: number; values: { v16: number; v17: number; v18: number; v19: number } }
 interface DebugWolfVariableBaseDetection { memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: DebugWolfVariableBaseCandidate[] }
 interface DebugWolfVariableWriteResult { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number }
+interface DebugWolfVariableChange { id: number; before: number; after: number; delta: number }
+interface DebugWolfVariableWatchResult { base: number; count: number; startedAt?: string; endedAt?: string; durationMs?: number; changes?: DebugWolfVariableChange[]; totalChanges?: number }
 
 interface DebugEntry {
   name: string;
@@ -72,6 +74,7 @@ interface DebugResponse {
   wolfVariables?: DebugWolfVariableRange;
   wolfVariableBaseDetection?: DebugWolfVariableBaseDetection;
   wolfVariableWrite?: DebugWolfVariableWriteResult;
+  wolfVariableWatch?: DebugWolfVariableWatchResult;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -108,6 +111,28 @@ const inputStyle: CSSProperties = {
   width: "100%", boxSizing: "border-box", border: "1px solid #354258", borderRadius: 10,
   padding: 10, background: "#080d14", color: "#edf3fc", fontSize: 13,
 };
+// AETHER_WOLF_VARIABLE_TRACKER_V1: per-game user labels live in localStorage; builtin labels stay as fallback.
+const WOLF_USER_LABELS_KEY = "aetherplay-wolf-user-labels";
+function readUserVariableLabels(): Record<string, Record<number, string>> {
+  try {
+    if (typeof localStorage === "undefined") return {};
+    const raw = localStorage.getItem(WOLF_USER_LABELS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, Record<number, string>> : {};
+  } catch { return {}; }
+}
+function writeUserVariableLabel(gameId: string, variableId: number, label: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const all = readUserVariableLabels();
+    const gameLabels = all[gameId] ?? {};
+    const trimmed = label.trim();
+    if (trimmed) gameLabels[variableId] = trimmed; else delete gameLabels[variableId];
+    all[gameId] = gameLabels;
+    localStorage.setItem(WOLF_USER_LABELS_KEY, JSON.stringify(all));
+  } catch { /* quota / private mode: labels just won't persist */ }
+}
 const WOLF_RUNTIME_VARIABLE_LABELS: Record<number, string> = {
   16: "メニュー非表示 / 菜单隐藏",
   17: "所持金 / 持有金钱",
@@ -174,6 +199,13 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [wolfV18SignatureText, setWolfV18SignatureText] = useState("-1");
   const [wolfV19SignatureText, setWolfV19SignatureText] = useState("57");
   const [wolfVariableBaseDetection, setWolfVariableBaseDetection] = useState<DebugWolfVariableBaseDetection | null>(null);
+  // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
+  const [wolfVariableWatchStartedAt, setWolfVariableWatchStartedAt] = useState<string | null>(null);
+  const [wolfVariableChanges, setWolfVariableChanges] = useState<DebugWolfVariableChange[] | null>(null);
+  const [wolfVariableWatchDurationMs, setWolfVariableWatchDurationMs] = useState<number | null>(null);
+  const [wolfUserLabels, setWolfUserLabels] = useState<Record<number, string>>(() => readUserVariableLabels()[gameId] ?? {});
+  const [wolfLabelDrafts, setWolfLabelDrafts] = useState<Record<number, string>>({});
+  const getWolfLabel = (id: number): string | undefined => wolfUserLabels[id] ?? WOLF_RUNTIME_VARIABLE_LABELS[id];
   // AETHER_WOLF_RUNTIME_VARIABLE_DIFF_V1: compare snapshots from the same live game instance.
   const [wolfVariableBaseline, setWolfVariableBaseline] = useState<{ gameId: string; range: DebugWolfVariableRange; capturedAt: string } | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
@@ -704,6 +736,52 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally { setBusy(""); }
   };
 
+  const startWolfVariableWatch = async () => {
+    if (!wolfVariableRange || wolfVariableRange.count !== 65) {
+      setError("请先自动定位并复读验证完整的 V0–V64 变量表。"); return;
+    }
+    setBusy("正在开始变量追踪…"); setError(""); setNotice(""); setWolfVariableChanges(null); setWolfVariableWatchDurationMs(null);
+    try {
+      const response = await request("wolf-variable-watch-start", {
+        variableBase: wolfVariableRange.base, variableCount: wolfVariableRange.count,
+      });
+      const watch = response.wolfVariableWatch;
+      if (!watch?.startedAt) throw new Error("运行时没有返回追踪开始时间。");
+      setWolfVariableWatchStartedAt(watch.startedAt);
+      setNotice("变量追踪已开始。回到游戏做一件可观察的事（打怪、买东西、移动、使用道具等），完成后点「结束追踪」。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
+  const stopWolfVariableWatch = async () => {
+    if (!wolfVariableWatchStartedAt) return;
+    setBusy("正在结束追踪并对比…"); setError(""); setNotice("");
+    try {
+      const response = await request("wolf-variable-watch-stop", {});
+      const watch = response.wolfVariableWatch;
+      if (!watch || !watch.changes) throw new Error("运行时没有返回追踪结果。");
+      setWolfVariableWatchStartedAt(null);
+      setWolfVariableChanges(watch.changes);
+      setWolfVariableWatchDurationMs(watch.durationMs ?? 0);
+      setNotice(`追踪结束：${watch.totalChanges ?? watch.changes.length} 个变量在 ${((watch.durationMs ?? 0) / 1000).toFixed(1)} 秒内发生变化。可以给每个变化的变量输入名称进行标注，保存在本机。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
+  const saveWolfVariableLabel = (variableId: number) => {
+    const draft = (wolfLabelDrafts[variableId] ?? "").trim();
+    writeUserVariableLabel(gameId, variableId, draft);
+    setWolfUserLabels((old) => {
+      const next = { ...old };
+      if (draft) next[variableId] = draft; else delete next[variableId];
+      return next;
+    });
+    setWolfLabelDrafts((old) => { const next = { ...old }; delete next[variableId]; return next; });
+    setNotice(draft ? `已保存 V${variableId} 名称「${draft}」（本机）。` : `已清除 V${variableId} 的名称标注。`);
+  };
+
   const detectWolfVariableBase = async () => {
     setError(""); setNotice(""); setWolfVariableBaseDetection(null);
     const parseInt32 = (raw: string, label: string): number => {
@@ -872,7 +950,8 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         rows: wolfVariableRange.rows.map((row) => ({
           ...row,
           addressHex: `0x${row.address.toString(16).toUpperCase().padStart(8, "0")}`,
-          knownLabel: WOLF_RUNTIME_VARIABLE_LABELS[row.id] || null,
+          knownLabel: getWolfLabel(row.id) || null,
+          knownLabelSource: wolfUserLabels[row.id] ? "user" : (WOLF_RUNTIME_VARIABLE_LABELS[row.id] ? "builtin" : null),
           baselineValue: baselineMatches ? baselineById.get(row.id) ?? null : null,
           changedSinceBaseline: baselineMatches ? baselineById.get(row.id) !== row.value : null,
         })),
@@ -881,6 +960,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
           "此报告来自用户输入的当前实例候选基址；工具只读，不修改任何变量。",
           "基址 0x03CECBC8 是由已知 V17 地址反推的候选值，不保证跨游戏或重新载入后保持不变。",
           "每项按 4 字节小端 Int32 解读；需要与游戏内变量值交叉核对后才能确认布局。",
+          "userLabels 下的名称是本机通过变化追踪标注，不构成引擎层官方命名；跨设备/重装需重新标注。",
           "快照差异仅在同一游戏运行实例、相同基址和相同数量下比较；重载/重启游戏后请清除并重新采集基线。",
         ],
       };
@@ -1197,6 +1277,42 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   </div>
                 )) : null}
               </div>
+              <div style={{ marginTop: 10, padding: 11, border: "1px solid #354258", borderRadius: 10, background: "#0f1722" }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>变量变化追踪（纯读取）</div>
+                <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.55 }}>
+                  在游戏里做一件事之前点「开始追踪」，做完之后点「结束追踪」，工具会自动比对这段时间内哪些 V 变量发生了变化。这是最快的语义识别方式——不用逆向，只要在游戏里正常操作。
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginTop: 9 }}>
+                  <button type="button" disabled={Boolean(busy) || !wolfVariableRange || Boolean(wolfVariableWatchStartedAt)} onClick={() => void startWolfVariableWatch()} style={{ ...buttonStyle, width: "100%", background: "#1f3a52", borderColor: "#3f6389" }}>
+                    {wolfVariableWatchStartedAt ? `追踪中（${new Date(wolfVariableWatchStartedAt).toLocaleTimeString()} 起）` : "开始追踪"}
+                  </button>
+                  <button type="button" disabled={Boolean(busy) || !wolfVariableWatchStartedAt} onClick={() => void stopWolfVariableWatch()} style={{ ...buttonStyle, width: "100%", background: "#204b40", borderColor: "#397c66" }}>结束追踪</button>
+                </div>
+                {wolfVariableChanges ? (
+                  <div style={{ marginTop: 10 }}>
+                    {wolfVariableChanges.length === 0 ? (
+                      <div style={{ ...subtleStyle }}>
+                        {wolfVariableWatchDurationMs !== null ? `追踪 ${(wolfVariableWatchDurationMs / 1000).toFixed(1)} 秒内没有变量发生变化。` : "追踪期间没有变量发生变化。"} 可能是动作太快、变量不在 V0–V64 范围，或游戏内存对象已变化。
+                      </div>
+                    ) : (
+                      <div style={{ border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
+                        {wolfVariableChanges.map((change) => (
+                          <div key={change.id} style={{ padding: "8px 10px", borderBottom: "1px solid #202b3a", background: "#2a1f14" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                              <strong style={{ color: "#ffd28a" }}>V{change.id}{getWolfLabel(change.id) ? ` · ${getWolfLabel(change.id)}` : ""}</strong>
+                              <code style={{ fontSize: 11, color: "#ffd28a" }}>{change.before} → {change.after}（{change.delta > 0 ? "+" : ""}{change.delta}）</code>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 6, marginTop: 6 }}>
+                              <input value={wolfLabelDrafts[change.id] ?? ""} placeholder={getWolfLabel(change.id) || "输入名称，例如 玩家HP"} onChange={(event) => setWolfLabelDrafts((old) => ({ ...old, [change.id]: event.target.value }))} style={{ ...inputStyle, padding: "6px 8px" }} />
+                              <button type="button" disabled={Boolean(busy)} onClick={() => saveWolfVariableLabel(change.id)} style={{ ...buttonStyle, padding: "6px 10px" }}>保存标注</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 0.8fr)", gap: 8, marginTop: 10 }}>
                 <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V0 候选基址
                   <input value={wolfVariableBaseText} spellCheck={false} onChange={(event) => { setWolfVariableBaseText(event.target.value); setWolfVariableRange(null); }} placeholder="0x03CECBC8" style={inputStyle} />
@@ -1221,7 +1337,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
               {wolfVariableBaseline ? <div style={{ ...subtleStyle, marginTop: 8, lineHeight: 1.6 }}>基线：{new Date(wolfVariableBaseline.capturedAt).toLocaleTimeString()} · {wolfVariableBaselineMatches ? `已比较，${wolfVariableChanges.length} 项变化` : "基线与当前基址/数量不匹配，或属于其他游戏；请重新设基线"}。若已重载/重新启动游戏，务必清除旧基线后再采集。</div> : null}
               <div style={{ marginTop: 10, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
                     {wolfVariableRange.rows.map((row) => {
-                      const label = WOLF_RUNTIME_VARIABLE_LABELS[row.id];
+                      const label = getWolfLabel(row.id);
                       const hasBaseline = wolfVariableBaselineMatches && wolfVariableBaselineValues.has(row.id);
                       const baselineValue = hasBaseline ? wolfVariableBaselineValues.get(row.id) : undefined;
                       const changed = hasBaseline && baselineValue !== row.value;
