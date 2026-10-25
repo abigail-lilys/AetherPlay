@@ -1536,7 +1536,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   {sysTimeFeatureScan.phase === "baseline" ? "基线初筛结果" : "时间差分结果"}
                 </div>
                 <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.7 }}>
-                  已扫描 {formatBytes(sysTimeFeatureScan.scannedBytes)} / {formatBytes(sysTimeFeatureScan.memoryBytes)} · 初筛候选 {sysTimeFeatureScan.baselineCandidateCount} · {sysTimeFeatureScan.phase === "baseline" ? "待复查" : `通过差分 ${sysTimeFeatureScan.candidateCount} / 检查 ${sysTimeFeatureScan.examinedCount ?? 0}`} {sysTimeFeatureScan.truncated ? "· 候选已截断（最多保存前 5000 个）" : ""}
+                  已扫描 {formatBytes(sysTimeFeatureScan.scannedBytes)} / {formatBytes(sysTimeFeatureScan.memoryBytes)} · 初筛候选 {sysTimeFeatureScan.baselineCandidateCount} · {sysTimeFeatureScan.phase === "baseline" ? "待复查" : `通过差分 ${sysTimeFeatureScan.candidateCount} / 检查 ${sysTimeFeatureScan.examinedCount ?? 0}`} {sysTimeFeatureScan.truncated ? "· 候选超出容量：已从全内存结果中抽样保留，不能视为穷尽验证" : ""}
                 </div>
                 {sysTimeFeatureScan.phase === "baseline" ? sysTimeFeatureScan.candidates.slice(0, 12).map((candidate, index) => <div key={`${candidate.signatureAddress}:${index}`} style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6 }}>
                   <code>推算 Sys0 基址 0x{candidate.base.toString(16).toUpperCase().padStart(8, "0")}</code> · 三元组地址 <code>0x{candidate.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</code> · [{candidate.before.frames}, {candidate.before.seconds}, {candidate.before.milliseconds}]
@@ -1547,7 +1547,7 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
                   <div>Δ帧={candidate.progress?.frameDelta} · Δ秒={candidate.progress?.secondsDelta} · Δ毫秒={candidate.progress?.millisecondsDelta} · 估算 FPS={candidate.progress?.approximateFps.toFixed(1)} · 时钟误差={candidate.progress?.clockErrorMs.toFixed(0)}ms</div>
                 </div>) : null}
                 {sysTimeFeatureScan.phase === "compare" && sysTimeFeatureScan.candidateCount === 0 && sysTimeFeatureScan.samples?.length ? <div style={{ marginTop: 7, lineHeight: 1.7, fontSize: 11 }}>
-                  <div style={{ fontWeight: 700 }}>差分样本（未通过验证，仅用于诊断）</div>
+                  <div style={{ fontWeight: 700 }}>差分样本（抽样诊断；仅显示最多 6 条，不代表全部候选）</div>
                   {sysTimeFeatureScan.samples.slice(0, 6).map((sample, index) => <div key={`${sample.signatureAddress}:${index}`} style={{ marginTop: 5 }}>
                     <code>0x{sample.signatureAddress.toString(16).toUpperCase().padStart(8, "0")}</code> [{sample.before.frames}, {sample.before.seconds}, {sample.before.milliseconds}] → [{sample.after.frames}, {sample.after.seconds}, {sample.after.milliseconds}], 间隔 {sample.elapsedMs.toFixed(0)}ms
                   </div>)}

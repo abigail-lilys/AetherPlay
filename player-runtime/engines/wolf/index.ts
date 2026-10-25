@@ -890,8 +890,14 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
             const base = signatureAddress - 28 * 4;
             if (base < 0 || base % 4 !== 0 || base + 164 * 4 > memoryBytes) continue;
             candidateCount += 1;
+            const sampledCandidate = { base, signatureAddress, before, sampledAtMs: performance.now() };
             if (candidates.length < maxStoredCandidates) {
-              candidates.push({ base, signatureAddress, before, sampledAtMs: performance.now() });
+              candidates.push(sampledCandidate);
+            } else {
+              // Reservoir sampling keeps candidate addresses representative across the entire
+              // WASM memory instead of retaining only the lowest-address matches.
+              const reservoirSlot = Math.floor(Math.random() * candidateCount);
+              if (reservoirSlot < maxStoredCandidates) candidates[reservoirSlot] = sampledCandidate;
             }
           }
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -925,7 +931,9 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
         const matches: Array<{ base: number; signatureAddress: number; before: SysTimeTriple; after?: SysTimeTriple; elapsedMs?: number; progress?: SysTimeProgress }> = [];
         const samples: Array<{ base: number; signatureAddress: number; before: SysTimeTriple; after: SysTimeTriple; elapsedMs: number; matched: boolean; progress?: SysTimeProgress }> = [];
         let candidateCount = 0;
+        let examinedCount = 0;
         for (const candidate of baseline.candidates) {
+          examinedCount += 1;
           const sampledAtMs = performance.now();
           const after: SysTimeTriple = {
             frames: view.getInt32(candidate.signatureAddress, true),
@@ -935,11 +943,23 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
           const elapsedMs = sampledAtMs - candidate.sampledAtMs;
           const progress = evaluateSysTimeProgress(candidate.before, after, elapsedMs);
           const matched = progress !== null;
+          const resultRow = { base: candidate.base, signatureAddress: candidate.signatureAddress, before: candidate.before, after, elapsedMs, progress: progress ?? undefined };
           if (matched) {
             candidateCount += 1;
-            if (matches.length < 100) matches.push({ base: candidate.base, signatureAddress: candidate.signatureAddress, before: candidate.before, after, elapsedMs, progress: progress ?? undefined });
+            if (matches.length < 100) matches.push(resultRow);
+            else {
+              // Keep valid matches representative too if there are many of them.
+              const matchSlot = Math.floor(Math.random() * candidateCount);
+              if (matchSlot < 100) matches[matchSlot] = resultRow;
+            }
           }
-          if (samples.length < 12) samples.push({ base: candidate.base, signatureAddress: candidate.signatureAddress, before: candidate.before, after, elapsedMs, matched, progress: progress ?? undefined });
+          const diagnosticRow = { ...resultRow, matched };
+          if (samples.length < 12) samples.push(diagnosticRow);
+          else {
+            // The UI displays only six rows; make them a sample across all examined candidates.
+            const sampleSlot = Math.floor(Math.random() * examinedCount);
+            if (sampleSlot < 12) samples[sampleSlot] = diagnosticRow;
+          }
         }
         const finalBuffer = aetherDebugGetMemoryBuffer();
         aetherDebugSysTimeBaseline = undefined;
