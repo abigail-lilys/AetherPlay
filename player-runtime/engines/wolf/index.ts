@@ -57,7 +57,7 @@ type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -73,6 +73,8 @@ type AetherDebugCommand = {
   neighborhoodRadius?: number;
   value?: number;
   expectedValue?: number;
+  variableBase?: number;
+  variableCount?: number;
 };
 type AetherDebugEntry = { name: string; path: string; kind: "directory" | "file"; size: number };
 type AetherDebugResponse = {
@@ -93,6 +95,7 @@ type AetherDebugResponse = {
   neighborhood?: AetherDebugMemoryNeighborhood;
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
+  wolfVariables?: { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> };
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: AetherDebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -689,7 +692,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
     if (command === "wasm-binary-export") {
       const bytes = aetherDebugCapturedWasmBytes;
@@ -751,6 +754,33 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       const paths = aetherDebugMetadataAssetPaths();
       const variableCatalog = buildWolfVariableCatalog(paths, aetherDebugReadMetadataAsset);
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, variableCatalog });
+      return;
+    }
+    // AETHER_WOLF_RUNTIME_VARIABLE_RANGE_V1: read-only, user-supplied base; never assume this base survives reloads.
+    if (command === "wolf-variable-range-read") {
+      const base = Number(message.variableBase);
+      const count = Number(message.variableCount);
+      if (!Number.isSafeInteger(base) || base < 0 || base > 0xffffffff || base % 4 !== 0) {
+        throw new Error("WOLF 变量表候选基址必须是 4 字节对齐的非负 WASM32 地址。");
+      }
+      if (!Number.isSafeInteger(count) || count < 1 || count > 256) {
+        throw new Error("变量数量必须是 1 至 256 之间的整数。");
+      }
+      const buffer = aetherDebugGetMemoryBuffer();
+      if (!buffer) throw new Error("尚未取得可读的 WASM 内存；请等待游戏初始化完成并重新探测。");
+      const end = base + count * 4;
+      if (!Number.isSafeInteger(end) || end > buffer.byteLength) {
+        throw new Error(`候选变量范围超出当前 WASM 内存：基址 0x${base.toString(16).toUpperCase()}，数量 ${count}，当前内存 ${buffer.byteLength} 字节。请重新确认本次运行的基址。`);
+      }
+      const view = new DataView(buffer);
+      const rows = Array.from({ length: count }, (_, id) => {
+        const address = base + id * 4;
+        return { id, address, value: view.getInt32(address, true) };
+      });
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true, wolfVariables: { base, count, memoryBytes: buffer.byteLength, rows },
+      });
       return;
     }
     if (command === "hp-chain-read") {

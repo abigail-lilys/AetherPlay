@@ -6,7 +6,7 @@ import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/r
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
-type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
 type DebugTab = "overview" | "files" | "variables" | "memory";
 type DebugFormat = "text" | "hex";
 type DebugScanType = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "f32" | "f64";
@@ -20,6 +20,7 @@ interface DebugAddressTrace { targetOffset: number; targetHex: string; memoryByt
 interface DebugNeighborhoodWord { offset: number; offsetHex: string; hex: string; u32: number; i32: number; f32: number }
 interface DebugNeighborhoodSnapshot { capturedAt: string; anchorOffset: number; anchorHex: string; radiusBytes: number; memoryBytes: number; words: DebugNeighborhoodWord[] }
 interface DebugFreezeEntry { key: string; type: DebugScanType; offset: number; value: number }
+interface DebugWolfVariableRange { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> }
 
 interface DebugEntry {
   name: string;
@@ -65,6 +66,7 @@ interface DebugResponse {
   memoryValue?: number;
   frozenCount?: number;
   variableCatalog?: WolfVariableCatalog;
+  wolfVariables?: DebugWolfVariableRange;
   runtimeIntrospection?: AetherRuntimeIntrospection;
   addressTrace?: DebugAddressTrace;
   hpChain?: WolfHpPointerChainSnapshot;
@@ -73,7 +75,7 @@ interface DebugResponse {
   wasmBinaryBytes?: number;
   wasmBinaryCaptureStatus?: string;
 }
-interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; }
+interface DebugRequestArgs { path?: string; format?: DebugFormat; content?: string; scanType?: DebugScanType; scanValue?: number; scanValue2?: number; scanFilter?: DebugScanFilter; scanStartOffset?: number; scanEndOffset?: number; page?: number; aligned?: boolean; offset?: number; neighborhoodRadius?: number; value?: number; expectedValue?: number; variableBase?: number; variableCount?: number; }
 interface PendingRequest {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
@@ -100,6 +102,12 @@ const subtleStyle: CSSProperties = { color: "#9eacc1", fontSize: 12 };
 const inputStyle: CSSProperties = {
   width: "100%", boxSizing: "border-box", border: "1px solid #354258", borderRadius: 10,
   padding: 10, background: "#080d14", color: "#edf3fc", fontSize: 13,
+};
+const WOLF_RUNTIME_VARIABLE_LABELS: Record<number, string> = {
+  16: "メニュー非表示 / 菜单隐藏",
+  17: "所持金 / 持有金钱",
+  18: "連れている魔物ID / 携带魔物 ID",
+  19: "追跡開始ID / 追踪开始 ID",
 };
 
 function newRequestId(): string {
@@ -148,7 +156,11 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [scanResults, setScanResults] = useState<DebugScanResult[]>([]);
   const [rowValues, setRowValues] = useState<Record<number, string>>({});
   const [frozenResults, setFrozenResults] = useState<DebugFreezeEntry[]>([]);
+  // AETHER_WOLF_RUNTIME_VARIABLE_RANGE_V1: the base is a per-instance candidate, not a permanent pointer.
   const [variableCatalog, setVariableCatalog] = useState<WolfVariableCatalog | null>(null);
+  const [wolfVariableBaseText, setWolfVariableBaseText] = useState("0x03CECBC8");
+  const [wolfVariableCountText, setWolfVariableCountText] = useState("65");
+  const [wolfVariableRange, setWolfVariableRange] = useState<DebugWolfVariableRange | null>(null);
   const [runtimeIntrospection, setRuntimeIntrospection] = useState<AetherRuntimeIntrospection | null>(null);
   // Read-only validation for a user-supplied, known WOLF variable address.
   const [directAddressText, setDirectAddressText] = useState("0x0795c0b0");
@@ -649,6 +661,77 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     }
   };
 
+  const readWolfVariableRange = async () => {
+    setError(""); setNotice("");
+    let base: number;
+    let count: number;
+    try {
+      base = readAddressInput(wolfVariableBaseText, "WOLF 变量表候选基址") as number;
+      count = Number(wolfVariableCountText.trim());
+      if (!Number.isSafeInteger(base) || base % 4 !== 0 || base > 0xffffffff) {
+        throw new Error("候选基址必须是 4 字节对齐的 WASM32 地址。");
+      }
+      if (!Number.isSafeInteger(count) || count < 1 || count > 256) {
+        throw new Error("读取数量必须是 1 至 256 的整数；验证 V0–V64 时请输入 65。");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    setBusy("正在只读检查 WOLF 变量表候选范围…");
+    try {
+      const response = await request("wolf-variable-range-read", { variableBase: base, variableCount: count });
+      if (!response.wolfVariables) throw new Error("运行时没有返回 WOLF 变量读取结果。");
+      setWolfVariableRange(response.wolfVariables);
+      const anchorText = response.wolfVariables.rows
+        .filter((row) => row.id >= 16 && row.id <= 19)
+        .map((row) => `V${row.id}=${row.value}`)
+        .join("，");
+      setNotice(`只读完成：${response.wolfVariables.count} 个 Int32 槽位；${anchorText || "范围未包含 V16–V19"}。请对照游戏内实际变量核实；这不会自动证明所有 V 编号都采用此布局。`);
+    } catch (cause) {
+      setWolfVariableRange(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const exportWolfVariableRange = async () => {
+    if (!wolfVariableRange) return;
+    setBusy("正在导出 WOLF 变量表 JSON…"); setError("");
+    try {
+      const report = {
+        format: "aetherplay-wolf-runtime-variable-range",
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        game: { id: gameId, title: gameTitle },
+        readOnly: true,
+        addressModel: "candidate base + variable id * 4, little-endian Int32",
+        base: wolfVariableRange.base,
+        baseHex: `0x${wolfVariableRange.base.toString(16).toUpperCase().padStart(8, "0")}`,
+        count: wolfVariableRange.count,
+        memoryBytes: wolfVariableRange.memoryBytes,
+        rows: wolfVariableRange.rows.map((row) => ({
+          ...row,
+          addressHex: `0x${row.address.toString(16).toUpperCase().padStart(8, "0")}`,
+          knownLabel: WOLF_RUNTIME_VARIABLE_LABELS[row.id] || null,
+        })),
+        notes: [
+          "此报告来自用户输入的当前实例候选基址；工具只读，不修改任何变量。",
+          "基址 0x03CECBC8 是由已知 V17 地址反推的候选值，不保证跨游戏或重新载入后保持不变。",
+          "每项按 4 字节小端 Int32 解读；需要与游戏内变量值交叉核对后才能确认布局。",
+        ],
+      };
+      const filename = `AetherPlay-WOLF-Variables-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      await saveAndroidTextFile(filename, JSON.stringify(report, null, 2));
+      setNotice(`已请求导出 ${filename}。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const loadVariableCatalog = async () => {
     setBusy("正在读取 WOLF 变量元数据…"); setError(""); setNotice("");
     try {
@@ -913,23 +996,62 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
         ) : null}
 
         {tab === "variables" ? (
-          <WolfVariableCatalogView
-            catalog={variableCatalog}
-            loading={Boolean(busy)}
-            onLoad={() => void loadVariableCatalog()}
-            hpChain={hpChain}
-            hpChainBusy={Boolean(busy)}
-            onRefreshHpChain={() => void refreshHpChain()}
-            onWriteHpChain={(value) => void writeHpChain(value)}
-            probeTarget={variableProbeTarget}
-            probeSummary={scanSummary}
-            probeResults={scanResults}
-            onStartVariableProbe={(target) => void startVariableProbe(target)}
-            onFilterVariableChanges={() => void filterVariableChanges()}
-            onMatchVariableCurrentValue={(value) => void matchVariableCurrentValue(value)}
-            onLoadProbePage={(page) => void loadScanPage(page)}
-            onExportProbePage={() => void exportVariableProbePage()}
-          />
+          <>
+            <section style={{ background: "#111a27", border: "1px solid #253247", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>WOLF 运行时变量表（只读验证）</div>
+              <div style={{ ...subtleStyle, marginTop: 5, lineHeight: 1.6 }}>
+                按候选基址 + V 编号 × 4，读取小端 Int32。默认基址 0x03CECBC8 是从当前样本的 V17=0x03CECC0C 反推的候选值，不是自动发现结果；换游戏或重新载入后请重新确认。此面板只读，不提供批量写入。
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 0.8fr)", gap: 8, marginTop: 10 }}>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>V0 候选基址
+                  <input value={wolfVariableBaseText} spellCheck={false} onChange={(event) => { setWolfVariableBaseText(event.target.value); setWolfVariableRange(null); }} placeholder="0x03CECBC8" style={inputStyle} />
+                </label>
+                <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5 }}>读取数量
+                  <input value={wolfVariableCountText} inputMode="numeric" onChange={(event) => { setWolfVariableCountText(event.target.value); setWolfVariableRange(null); }} placeholder="65" style={inputStyle} />
+                </label>
+              </div>
+              <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void readWolfVariableRange()} style={{ ...buttonStyle, width: "100%", marginTop: 10 }}>
+                {busy.includes("只读检查 WOLF 变量表") ? "读取中…" : "读取 V0–V64（只读）"}
+              </button>
+              {wolfVariableRange ? (
+                <>
+                  <div style={{ ...subtleStyle, marginTop: 10, lineHeight: 1.6 }}>
+                    基址 0x{wolfVariableRange.base.toString(16).toUpperCase().padStart(8, "0")} · {wolfVariableRange.count} 项 · 当前 WASM 内存 {formatBytes(wolfVariableRange.memoryBytes)}。V16–V19 是现有已知样本，其余编号仍需对照游戏验证。
+                  </div>
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void exportWolfVariableRange()} style={{ ...buttonStyle, width: "100%", marginTop: 8 }}>导出读取结果 JSON</button>
+                  <div style={{ marginTop: 10, border: "1px solid #253247", borderRadius: 9, overflow: "hidden" }}>
+                    {wolfVariableRange.rows.map((row) => {
+                      const label = WOLF_RUNTIME_VARIABLE_LABELS[row.id];
+                      return <div key={row.id} style={{ padding: "8px 10px", borderBottom: "1px solid #202b3a", background: label ? "#172437" : "#0f1722" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                          <strong style={{ fontSize: 13, color: label ? "#b8d5ff" : "#edf3fc" }}>V{row.id}{label ? ` · ${label}` : ""}</strong>
+                          <code style={{ fontSize: 11, color: "#9eacc1" }}>0x{row.address.toString(16).toUpperCase().padStart(8, "0")}</code>
+                        </div>
+                        <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{row.value}</div>
+                      </div>;
+                    })}
+                  </div>
+                </>
+              ) : <div style={{ ...subtleStyle, marginTop: 8 }}>尚未读取。默认只读取当前内存，不修改数值。</div>}
+            </section>
+            <WolfVariableCatalogView
+              catalog={variableCatalog}
+              loading={Boolean(busy)}
+              onLoad={() => void loadVariableCatalog()}
+              hpChain={hpChain}
+              hpChainBusy={Boolean(busy)}
+              onRefreshHpChain={() => void refreshHpChain()}
+              onWriteHpChain={(value) => void writeHpChain(value)}
+              probeTarget={variableProbeTarget}
+              probeSummary={scanSummary}
+              probeResults={scanResults}
+              onStartVariableProbe={(target) => void startVariableProbe(target)}
+              onFilterVariableChanges={() => void filterVariableChanges()}
+              onMatchVariableCurrentValue={(value) => void matchVariableCurrentValue(value)}
+              onLoadProbePage={(page) => void loadScanPage(page)}
+              onExportProbePage={() => void exportVariableProbePage()}
+            />
+          </>
         ) : null}
         {tab === "memory" ? (
           <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
