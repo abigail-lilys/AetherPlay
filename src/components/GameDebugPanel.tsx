@@ -4,6 +4,7 @@ import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
 import type { WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import type { AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
 import type { WolfHpPointerChainSnapshot } from "@/player-runtime/engines/wolf/hpPointerChain";
+import { buildWolfReadbackReportHtml, buildWolfReadbackReportJson, type NewWolfReadbackRecord, type WolfReadbackRecord } from "@/src/lib/wolfReadbackReport";
 import { WolfVariableCatalogView, type WolfVariableProbeTarget } from "@/src/components/WolfVariableCatalogView";
 
 type DebugCommand = "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
@@ -210,6 +211,18 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
   const [sysSignatureTexts, setSysSignatureTexts] = useState<string[]>(["", "", "", ""]);
   const [sysVariableBaseDetection, setSysVariableBaseDetection] = useState<DebugSysVariableBaseDetection | null>(null);
   const [sysVariableRange, setSysVariableRange] = useState<DebugSysVariableRange | null>(null);
+  // AETHERPLAY_WOLF_READBACK_VISUAL_V2: keep per-instance candidate readback evidence for visual export.
+  const [readbackRecords, setReadbackRecords] = useState<WolfReadbackRecord[]>([]);
+  const [visibleGameValueText, setVisibleGameValueText] = useState("");
+  const appendReadbackRecord = (record: NewWolfReadbackRecord) => {
+    setReadbackRecords((old) => [...old, {
+      ...record,
+      id: newRequestId(),
+      capturedAt: new Date().toISOString(),
+      gameId,
+      gameTitle,
+    }].slice(-100));
+  };
 
   // AETHER_WOLF_VARIABLE_TRACKER_V1: watch snapshot lives in runtime; panel keeps only UI state and labels.
   const [projectVariableNames, setProjectVariableNames] = useState<Record<number, string>>({});
@@ -590,6 +603,31 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
       applyScanResponse(response);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(""); }
   };
+  // AETHERPLAY_WOLF_READBACK_VISUAL_V2: start a read-only exact scan from a value visible in-game.
+  const scanVisibleGameValue = async () => {
+    const raw = visibleGameValueText.trim();
+    const value = Number(raw);
+    if (!raw || !Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+      setError("请输入游戏当前显示的整数（Int32：-2147483648 至 2147483647）。");
+      return;
+    }
+    setBusy("正在精确搜索游戏可见数值…"); setError(""); setNotice("");
+    try {
+      await request("scan-reset");
+      setScanSummary(null); setScanResults([]); setRowValues({});
+      setVariableProbeTarget(null);
+      const response = await request("scan-first", { scanType: "i32", scanValue: value, aligned: true });
+      if (!response.scan) throw new Error("运行时没有返回精确扫描结果。");
+      setScanMode("exact"); setScanType("i32"); setScanValue(String(value)); setRefineValue(String(value));
+      setScanFilter("changed"); setAlignedScan(true);
+      setScanSummary(response.scan); setScanResults(response.scan.results || []); setRowValues({});
+      setTab("memory");
+      setNotice("首轮精确扫描完成：" + response.scan.count.toLocaleString() + " 个候选地址。回到游戏改变该数值，再在内存页选择“已变化”并再次筛选。首次扫描只读，不会修改数值。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(""); }
+  };
+
   const loadScanPage = async (page: number) => {
     if (!scanSummary || page < 0 || page >= scanSummary.pageCount || page === scanSummary.page) return;
     setBusy("正在读取扫描结果页…"); setError("");
@@ -780,16 +818,34 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     setWolfVariableBaseText(baseText);
     setWolfVariableRange(null);
     setBusy("已找到变量基址，正在立即复读变量范围…"); setError(""); setNotice("");
+    const expectedRows = [
+      { variable: "V16", id: 16, address: candidate.base + 16 * 4, expected: candidate.values.v16 },
+      { variable: "V17", id: 17, address: candidate.base + 17 * 4, expected: candidate.values.v17 },
+      { variable: "V18", id: 18, address: candidate.base + 18 * 4, expected: candidate.values.v18 },
+      { variable: "V19", id: 19, address: candidate.base + 19 * 4, expected: candidate.values.v19 },
+    ];
+    let values: WolfReadbackRecord["values"] = expectedRows.map((item) => ({ variable: item.variable, address: item.address, expected: item.expected, actual: null, matches: false }));
+    let recorded = false;
     try {
       const response = await request("wolf-variable-range-read", { variableBase: candidate.base, variableCount: count });
       if (!response.wolfVariables) throw new Error("运行时没有返回基址复核结果。");
-      const anchors = new Map(response.wolfVariables.rows.map((row) => [row.id, row.value] as [number, number]));
-      if (anchors.get(16) !== candidate.values.v16 || anchors.get(17) !== candidate.values.v17 || anchors.get(18) !== candidate.values.v18 || anchors.get(19) !== candidate.values.v19) {
-        throw new Error("候选基址复读时 V16–V19 与扫描签名不一致；可能发生了游戏状态变化。未将本次读取标记为有效，请重新定位。");
-      }
+      values = expectedRows.map((item) => {
+        const row = response.wolfVariables!.rows.find((entry) => entry.id === item.id);
+        const actual = row?.value ?? null;
+        return { variable: item.variable, address: row?.address ?? item.address, expected: item.expected, actual, matches: actual === item.expected };
+      });
+      const matched = values.every((item) => item.matches);
+      const reason = matched ? null : "候选基址复读时，V16–V19 至少一项与扫描签名不一致；可能发生了游戏状态变化。";
+      appendReadbackRecord({ kind: "WOLF", source: "V16–V19 自动定位后复读", base: candidate.base, count, success: matched, values, reason });
+      recorded = true;
+      if (!matched) throw new Error("候选基址复读时 V16–V19 与扫描签名不一致；可能发生了游戏状态变化。未将本次读取标记为有效，请重新定位。");
       setWolfVariableRange(response.wolfVariables);
       setNotice(`基址定位并复核成功：${baseText}；V16=${candidate.values.v16}、V17=${candidate.values.v17}、V18=${candidate.values.v18}、V19=${candidate.values.v19}。当前实例已读取 ${count} 项。`);
     } catch (cause) {
+      if (!recorded) appendReadbackRecord({
+        kind: "WOLF", source: "V16–V19 自动定位后复读", base: candidate.base, count, success: false, values,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      });
       setWolfVariableRange(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(""); }
@@ -874,18 +930,30 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     count: number,
   ) => {
     setBusy("已发现 Sys 候选基址，正在回读并验证特征…"); setError(""); setNotice("");
+    const expectedRows = signatureValues.map((expected, index) => ({ variable: "Sys" + (startIndex + index), id: startIndex + index, address: candidate.base + (startIndex + index) * 4, expected }));
+    let values: WolfReadbackRecord["values"] = expectedRows.map((item) => ({ variable: item.variable, address: item.address, expected: item.expected, actual: null, matches: false }));
+    let recorded = false;
     try {
       const response = await request("sys-variable-range-read", { sysVariableBase: candidate.base, sysVariableCount: count });
       const range = response.sysVariables;
       if (!range) throw new Error("运行时没有返回 Sys 变量范围读取结果。");
-      for (let i = 0; i < signatureValues.length; i += 1) {
-        if (range.rows[startIndex + i]?.value !== signatureValues[i]) {
-          throw new Error(`Sys 候选复读失败：Sys${startIndex + i} 与扫描时的值不一致。游戏状态可能已改变；未采用此基址，请重新定位。`);
-        }
-      }
+      values = expectedRows.map((item) => {
+        const row = range.rows.find((entry) => entry.id === item.id);
+        const actual = row?.value ?? null;
+        return { variable: item.variable, address: row?.address ?? item.address, expected: item.expected, actual, matches: actual === item.expected };
+      });
+      const mismatch = values.find((item) => !item.matches);
+      const reason = mismatch ? `${mismatch.variable} 复读值与扫描期望值不一致；游戏状态可能已改变。` : null;
+      appendReadbackRecord({ kind: "Sys", source: `Sys${startIndex} 起连续特征复读`, base: candidate.base, count, success: !mismatch, values, reason });
+      recorded = true;
+      if (mismatch) throw new Error(`Sys 候选复读失败：${mismatch.variable} 与扫描时的值不一致。游戏状态可能已改变；未采用此基址，请重新定位。`);
       setSysVariableRange(range);
       setNotice(`Sys 基址只读定位并复读成功：0x${range.base.toString(16).toUpperCase().padStart(8, "0")}；已读取 ${range.count} 项，${signatureValues.length} 个连续特征全部匹配。此结果尚不开放写入。`);
     } catch (cause) {
+      if (!recorded) appendReadbackRecord({
+        kind: "Sys", source: `Sys${startIndex} 起连续特征复读`, base: candidate.base, count, success: false, values,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      });
       setSysVariableRange(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(""); }
@@ -1080,6 +1148,34 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
     } finally {
       setBusy("");
     }
+  };
+
+  // AETHERPLAY_WOLF_READBACK_VISUAL_V2: export all current-game readback evidence without embedding HTML in TSX.
+  const exportReadbackReport = async (format: "html" | "json") => {
+    const records = readbackRecords.filter((record) => record.gameId === gameId);
+    if (records.length === 0) { setError("尚无复读验证记录。请先定位并执行一次 WOLF 或 Sys 候选复读。"); return; }
+    const exportedAt = new Date().toISOString();
+    const content = format === "html"
+      ? buildWolfReadbackReportHtml(records, exportedAt)
+      : buildWolfReadbackReportJson(records, exportedAt);
+    const safeTitle = gameTitle.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\s+/g, "_").slice(0, 40) || "WOLF";
+    const filename = "AetherPlay-" + safeTitle + "-readback-" + Date.now() + (format === "html" ? ".html" : ".json");
+    setBusy(format === "html" ? "正在导出可视化复读报告…" : "正在导出复读记录 JSON…"); setError(""); setNotice("");
+    try {
+      if (Capacitor.getPlatform() === "android") {
+        await saveAndroidTextFile(filename, content);
+      } else {
+        const blob = new Blob([content], { type: format === "html" ? "text/html;charset=utf-8" : "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url; link.download = filename; link.style.display = "none";
+        document.body.appendChild(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }
+      setNotice("已导出 " + filename + "。报告包含每次候选基址、扫描期望值、复读实际值与通过/失败原因。");
+    } catch (cause) {
+      setError(cause instanceof Error ? "导出复读报告失败：" + cause.message : "导出复读报告失败：" + String(cause));
+    } finally { setBusy(""); }
   };
 
   const loadVariableCatalog = async () => {
@@ -1353,6 +1449,45 @@ export function GameDebugPanel({ visible, gameId, gameTitle, frameRef, onClose }
 
         {tab === "variables" ? (
           <>
+            <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 750 }}>复读验证记录与可视化导出（{readbackRecords.filter((record) => record.gameId === gameId).length}）</div>
+              <div style={{ ...subtleStyle, marginTop: 6, lineHeight: 1.6 }}>记录自动定位后候选地址的复读结果，包括扫描时的期望值、重新读取的实际值以及不一致原因。记录仅保存在当前调试面板会话中。</div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginTop: 10 }}>
+                <button type="button" disabled={Boolean(busy) || !readbackRecords.some((record) => record.gameId === gameId)} onClick={() => void exportReadbackReport("html")} style={{ ...buttonStyle, width: "100%", background: "#204b40", borderColor: "#397c66" }}>导出可视化 HTML</button>
+                <button type="button" disabled={Boolean(busy) || !readbackRecords.some((record) => record.gameId === gameId)} onClick={() => void exportReadbackReport("json")} style={{ ...buttonStyle, width: "100%" }}>导出原始 JSON</button>
+              </div>
+              {readbackRecords.filter((record) => record.gameId === gameId).length === 0 ? <div style={{ ...subtleStyle, marginTop: 8 }}>尚无记录。成功或失败的 WOLF / Sys 自动定位后复读都会在这里留档。</div> : (
+                <div style={{ marginTop: 10 }}>
+                  {readbackRecords.filter((record) => record.gameId === gameId).slice().reverse().slice(0, 12).map((record) => (
+                    <div key={record.id} style={{ marginTop: 8, padding: 10, border: "1px solid #354258", borderRadius: 9, background: "#0f1722" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                        <strong style={{ fontSize: 12 }}>{record.kind} · {record.source}</strong>
+                        <span style={{ fontSize: 11, fontWeight: 750, color: record.success ? "#b8f3da" : "#ffd4dc" }}>{record.success ? "复读通过" : "复读失败"}</span>
+                      </div>
+                      <div style={{ ...subtleStyle, marginTop: 4 }}>基址 0x{record.base.toString(16).toUpperCase().padStart(8, "0")} · 读取 {record.count} 项 · {new Date(record.capturedAt).toLocaleString()}</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(125px, 1fr))", gap: 6, marginTop: 8 }}>
+                        {record.values.map((value) => (
+                          <div key={value.variable} style={{ padding: 7, borderRadius: 7, background: value.matches ? "#163b31" : "#4a262b" }}>
+                            <div style={{ fontSize: 11, color: "#c7d2e2" }}>{value.variable} · 0x{value.address.toString(16).toUpperCase().padStart(8, "0")}</div>
+                            <div style={{ fontSize: 12, fontWeight: 750, overflowWrap: "anywhere" }}>{value.expected} → {value.actual === null ? "未读到" : value.actual}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {record.reason ? <div style={{ marginTop: 7, fontSize: 12, color: "#ffd28a", overflowWrap: "anywhere" }}>{record.reason}</div> : null}
+                    </div>
+                  ))}
+                  {readbackRecords.filter((record) => record.gameId === gameId).length > 12 ? <div style={{ ...subtleStyle, marginTop: 7 }}>页面显示最近 12 条；导出文件包含当前游戏全部记录（最多保留 100 条）。</div> : null}
+                </div>
+              )}
+            </section>
+            <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 750 }}>按游戏可见数值反查内存地址</div>
+              <div style={{ ...subtleStyle, marginTop: 6, lineHeight: 1.6 }}>填写游戏当前显示的整数，例如金钱、HP 或道具数量。工具会切换到内存页执行 Int32 精确扫描；回到游戏改变数值后，再按“已变化”筛选。首轮扫描只读。</div>
+              <label style={{ ...subtleStyle, display: "flex", flexDirection: "column", gap: 5, marginTop: 9 }}>游戏中当前可见的整数
+                <input value={visibleGameValueText} inputMode="numeric" onChange={(event) => setVisibleGameValueText(event.target.value)} placeholder="例如 1459" style={inputStyle} />
+              </label>
+              <button type="button" disabled={Boolean(busy) || !capabilities?.memoryAvailable} onClick={() => void scanVisibleGameValue()} style={{ ...buttonStyle, width: "100%", marginTop: 9, background: "#204b40", borderColor: "#397c66" }}>精确搜索该数值（只读）</button>
+            </section>
             <section style={{ background: "#111a27", border: "1px solid #354258", borderRadius: 14, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 15, fontWeight: 750 }}>Sys 系统数值变量：动态基址定位（只读）</div>
               <div style={{ ...subtleStyle, marginTop: 6, lineHeight: 1.6 }}>
