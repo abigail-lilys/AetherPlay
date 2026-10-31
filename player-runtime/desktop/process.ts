@@ -71,12 +71,12 @@ export function createProcessRuntime(options = {}) {
     setProcessDefault(processObject, "env", {});
     setProcessDefault(processObject, "argv", ["/Game.exe"]);
     setProcessDefault(processObject, "execArgv", []);
-    setProcessDefault(processObject, "version", "v16.20.2");
+    setProcessDefault(processObject, "version", "v18.3.0");
     const versions =
       processObject.versions && typeof processObject.versions === "object"
         ? processObject.versions
         : {};
-    setProcessDefault(versions, "node", "16.20.2");
+    setProcessDefault(versions, "node", "18.3.0");
     setProcessDefault(versions, "nw", "0.72.0");
     setProcessDefault(versions, "node-webkit", versions.nw);
     setProcessValue(processObject, "versions", versions);
