@@ -76,7 +76,7 @@ export function createProcessRuntime(options = {}) {
       processObject.versions && typeof processObject.versions === "object"
         ? processObject.versions
         : {};
-    setProcessDefault(versions, "node", "18.3.0");
+    // setProcessDefault(versions, "node", "18.3.0");
     setProcessDefault(versions, "nw", "0.72.0");
     setProcessDefault(versions, "node-webkit", versions.nw);
     setProcessValue(processObject, "versions", versions);
