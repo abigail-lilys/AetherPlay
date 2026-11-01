@@ -6,6 +6,7 @@ export function createAssetRouter(config, pathRuntime) {
     encodedFileRouteUrl,
     fileRouteReference,
     manifestReferenceAliases,
+    lookupManifestFile,
     rpgMakerAssetReferenceAliases,
   } = pathRuntime;
   const manifestUrlByRawReference = new Map();
@@ -34,6 +35,17 @@ export function createAssetRouter(config, pathRuntime) {
       addFileRouteReference(alias, file.url, 0);
     }
     addRawAssetReference(fileRouteReference(rawPath), file.url, 0);
+    const wasmName = rawPath.slice(rawPath.lastIndexOf("/") + 1);
+    if (
+      wasmName &&
+      wasmName.toLowerCase().endsWith(".wasm") &&
+      lookupManifestFile("/www/" + wasmName) === file
+    ) {
+      addAssetReferenceVariants(wasmName, file.url, 0);
+      addAssetReferenceVariants("www/" + wasmName, file.url, 0);
+      addFileRouteReference(wasmName, file.url, 0);
+      addFileRouteReference("www/" + wasmName, file.url, 0);
+    }
   }
 
   for (const file of config.files) {

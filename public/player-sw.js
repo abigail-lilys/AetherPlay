@@ -6,7 +6,7 @@ const BLOB_STORE = "blobs";
 const HANDLE_STORE = "handles";
 const WOLF_SAVE_STORE = "wolfSaves"; // AETHER_SW_WOLF_SAVE_STORE_V1
 
-const PLAYER_DESKTOP_RUNTIME_VERSION = "desktop-api-10";
+const PLAYER_DESKTOP_RUNTIME_VERSION = "desktop-api-11";
 const PLAYER_BRIDGE_RUNTIME_VERSION = "bridge-api-14";
 const PLAYER_WOLF_RUNTIME_VERSION = "wolf-compat-11";
 const SESSION_FILE_TIMEOUT_MS = 10000;

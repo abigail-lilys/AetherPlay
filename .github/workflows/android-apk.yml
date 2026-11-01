@@ -28,6 +28,8 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Test PGMMV WASM URL routing
+        run: pnpm test -- player-runtime/desktop/assetRouting.test.ts
 
       - name: Build web player
         run: pnpm run build
