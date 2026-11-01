@@ -3,6 +3,7 @@ import { rpgMakerAssetReferenceAliases } from "@/player-runtime/engines/rpgmaker
 
 export function createPathRuntime(config) {
   const manifestFileByKey = new Map();
+  const manifestExactFileByKey = new Map();
   const manifestDirs = new Set();
 
   function assetReferenceVariants(reference) {
@@ -103,6 +104,11 @@ export function createPathRuntime(config) {
   }
 
   for (const file of config.files) {
+    const exactKey = manifestKey(file.path);
+    if (exactKey) {
+      manifestExactFileByKey.set(exactKey, file);
+      manifestExactFileByKey.set(exactKey.toLowerCase(), file);
+    }
     for (const alias of manifestAliases(file.path)) {
       manifestFileByKey.set(alias, file);
       manifestFileByKey.set(alias.toLowerCase(), file);
@@ -233,6 +239,22 @@ export function createPathRuntime(config) {
   }
 
   function lookupManifestFile(path) {
+    const normalized = normalizePath(path);
+
+    // Nested /www paths must be exact manifest entries.
+    // Only root-level /www/<name>.wasm uses basename fallback.
+    if (normalized.toLowerCase().startsWith("/www/")) {
+      const relativePath = normalized.slice(1);
+      const nestedPath = relativePath.slice(4);
+      if (nestedPath.includes("/")) {
+        return (
+          manifestExactFileByKey.get(relativePath) ??
+          manifestExactFileByKey.get(relativePath.toLowerCase()) ??
+          null
+        );
+      }
+    }
+
     for (const alias of manifestAliases(path)) {
       const exact = manifestFileByKey.get(alias);
       if (exact) return exact;

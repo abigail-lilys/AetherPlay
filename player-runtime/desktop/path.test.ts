@@ -43,6 +43,16 @@ describe("PGMMV/Emscripten wasm manifest aliases", () => {
       .toBeNull();
   });
 
+  it("allows nested www paths only for exact manifest entries", () => {
+    const runtime = runtimeWithFiles([
+      "www/runtime/pgmmv.wasm",
+    ]);
+
+    expect(
+      runtime.lookupManifestFile("/www/runtime/pgmmv.wasm")?.path,
+    ).toBe("www/runtime/pgmmv.wasm");
+  });
+
   it("keeps exact manifest matches first", () => {
     const runtime = runtimeWithFiles([
       "www/pgmmv.wasm",
