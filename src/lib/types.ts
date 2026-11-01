@@ -75,7 +75,7 @@ export type PlayerToParentMessage =
   | { type: "text-log"; gameId: string; text: string; at: number }
   | { type: "runtime-error"; message: string; stack?: string }
   | { type: "wolf-assets-request"; gameId: string; requestId: string }
-  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer }
+  | { type: "wolf-save-written"; gameId: string; path: string; data: ArrayBuffer; fingerprint: string; generation: number }
   | { type: "wolf-save-writeback-event"; gameId: string; event: string; path: string; details: string; at: number };
 
 export type ParentToPlayerMessage =
@@ -88,8 +88,10 @@ export type ParentToPlayerMessage =
       type: "wolf-assets-response";
       requestId: string;
       assets?: Array<{ path: string; url: string; size: number }>;
+      externalSaveRootRegistered?: boolean;
       error?: string;
-    };
+    }
+  | { type: "wolf-save-writeback-ack"; gameId: string; path: string; fingerprint: string; generation: number; ok: boolean; error?: string };
 
 export interface ZipArchiveFileEntry {
   /** Virtual path exposed to the game after wrapper-folder normalization. */

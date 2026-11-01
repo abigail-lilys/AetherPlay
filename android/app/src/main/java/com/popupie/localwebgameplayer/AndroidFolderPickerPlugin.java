@@ -26,6 +26,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
 import java.io.OutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.util.Arrays;
 
 @CapacitorPlugin(name = "AndroidFolderPicker")
@@ -554,56 +557,154 @@ public class AndroidFolderPickerPlugin extends Plugin {
         }
     }
 
+    private static final long MAX_TEXT_EXPORT_BYTES = 8L * 1024L * 1024L;
+    private static final java.util.concurrent.ExecutorService TEXT_EXPORT_EXECUTOR =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    private File getTextExportStageDirectory() throws Exception {
+        File directory = new File(getContext().getCacheDir(), "aetherplay-text-exports").getCanonicalFile();
+        if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) {
+            throw new IllegalStateException("Cannot create temporary export directory");
+        }
+        return directory;
+    }
+
+    private File getTextExportStageFile(PluginCall call) {
+        if (call == null) return null;
+        String path = call.getString("_aetherplayTextExportStage");
+        if (path == null || path.trim().isEmpty()) return null;
+        try {
+            File directory = getTextExportStageDirectory();
+            File file = new File(path).getCanonicalFile();
+            return directory.equals(file.getParentFile()) ? file : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void cleanupExpiredTextExportStages(File directory) {
+        File[] files = directory.listFiles();
+        if (files == null) return;
+        long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;
+        for (File file : files) {
+            try {
+                if (file.isFile() && file.lastModified() < cutoff) file.delete();
+            } catch (Exception ignored) {}
+        }
+    }
+
     @PluginMethod
     public void exportTextFile(PluginCall call) {
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("text/plain");
         String filename = call.getString("filename");
-        if (filename == null || filename.trim().isEmpty()) {
-            filename = "LocalWebGamePlayer-diagnostics.txt";
+        if (filename == null || filename.trim().isEmpty()) filename = "LocalWebGamePlayer-diagnostics.txt";
+        String content = call.getString("content");
+        if (content == null || content.isEmpty()) {
+            call.reject("Export content is empty; refusing to open a save dialog for a 0-byte file");
+            return;
         }
-        intent.putExtra(Intent.EXTRA_TITLE, filename);
-        startActivityForResult(call, intent, "diagnosticTextFileCreated");
+        byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+        if (contentBytes.length == 0 || contentBytes.length > MAX_TEXT_EXPORT_BYTES) {
+            call.reject("Export size is invalid or exceeds 8 MiB (bytes=" + contentBytes.length + ")");
+            return;
+        }
+
+        File stagedFile = null;
+        try {
+            File stageDirectory = getTextExportStageDirectory();
+            cleanupExpiredTextExportStages(stageDirectory);
+            stagedFile = new File(stageDirectory, "export-" + java.util.UUID.randomUUID().toString() + ".tmp");
+            try (FileOutputStream output = new FileOutputStream(stagedFile)) {
+                output.write(contentBytes);
+                output.flush();
+                output.getFD().sync();
+            }
+            if (stagedFile.length() != contentBytes.length) {
+                throw new IllegalStateException("Temporary export verification failed: expected "
+                    + contentBytes.length + " bytes, got " + stagedFile.length());
+            }
+            // Persist only the small staged-file path with the PluginCall.
+            // Capacitor saves PluginCall data into Activity state while another app's
+            // document picker is open; keeping a large JSON string here risks oversized
+            // Activity state / TransactionTooLargeException and leaves 0-byte documents.
+            call.getData().put("_aetherplayTextExportStage", stagedFile.getAbsolutePath());
+            call.getData().remove("content");
+
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType(filename.toLowerCase(java.util.Locale.ROOT).endsWith(".json")
+                ? "application/json" : "text/plain");
+            intent.putExtra(Intent.EXTRA_TITLE, filename);
+            startActivityForResult(call, intent, "diagnosticTextFileCreated");
+        } catch (Exception error) {
+            if (stagedFile != null) stagedFile.delete();
+            call.reject("Could not prepare export file: " + error.getMessage(), error);
+        }
     }
 
     @ActivityCallback
     private void diagnosticTextFileCreated(PluginCall call, ActivityResult result) {
         if (call == null) return;
+        File stagedFile = getTextExportStageFile(call);
         if (result == null || result.getResultCode() != Activity.RESULT_OK
                 || result.getData() == null || result.getData().getData() == null) {
-            call.reject("TXT save cancelled", "CANCELLED");
+            if (stagedFile != null) stagedFile.delete();
+            call.reject("File save cancelled", "CANCELLED");
             return;
         }
-        Uri uri = result.getData().getData();
-        String content = call.getString("content");
-        if (content == null || content.isEmpty()) {
-            call.reject("Diagnostics content is empty; refusing to create a 0-byte file");
-            return;
-        }
-        byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
-        try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
-            if (output == null) throw new IllegalStateException("Could not open destination file");
-            output.write(contentBytes);
-            output.flush();
-        } catch (Exception error) {
-            call.reject("Could not save diagnostics TXT: " + error.getMessage(), error);
-            return;
-        }
+
+        final Uri uri = result.getData().getData();
+        final byte[] contentBytes;
         try {
-            long actualSize = getDocumentSize(uri);
-            if (actualSize != contentBytes.length) {
-                throw new IllegalStateException("Diagnostic TXT verification failed: expected "
-                    + contentBytes.length + " bytes, received " + actualSize);
+            if (stagedFile != null && stagedFile.isFile() && stagedFile.length() > 0
+                    && stagedFile.length() <= MAX_TEXT_EXPORT_BYTES) {
+                try (FileInputStream input = new FileInputStream(stagedFile);
+                     ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+                    byte[] chunk = new byte[8192];
+                    int count;
+                    while ((count = input.read(chunk)) != -1) buffer.write(chunk, 0, count);
+                    contentBytes = buffer.toByteArray();
+                }
+            } else {
+                throw new IllegalStateException("Temporary export data is missing or empty; no file contents were written. Please retry the export.");
             }
-            JSObject response = new JSObject();
-            response.put("uri", uri.toString());
-            response.put("bytesWritten", contentBytes.length);
-            response.put("verifiedBytes", actualSize);
-            call.resolve(response);
+            if (contentBytes.length == 0 || contentBytes.length > MAX_TEXT_EXPORT_BYTES) {
+                throw new IllegalStateException("Export content length is invalid: " + contentBytes.length);
+            }
         } catch (Exception error) {
-            call.reject("Could not verify saved diagnostics TXT: " + error.getMessage(), error);
+            if (stagedFile != null) stagedFile.delete();
+            try { DocumentsContract.deleteDocument(getContext().getContentResolver(), uri); } catch (Exception ignored) {}
+            call.reject("Could not load staged export data: " + error.getMessage(), error);
+            return;
         }
+
+        final File finalStagedFile = stagedFile;
+        TEXT_EXPORT_EXECUTOR.execute(() -> {
+            try {
+                ContentResolver resolver = getContext().getContentResolver();
+                // Explicit truncate/write mode; verify by reading actual bytes.
+                // COLUMN_SIZE can temporarily report 0 for some Android document providers.
+                try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+                    if (output == null) throw new IllegalStateException("Could not open destination file");
+                    output.write(contentBytes);
+                    output.flush();
+                }
+                byte[] savedBytes = readDocumentBytes(uri);
+                if (!Arrays.equals(contentBytes, savedBytes)) {
+                    throw new IllegalStateException("Saved-file verification failed: expected "
+                        + contentBytes.length + " bytes, read back " + savedBytes.length);
+                }
+                JSObject response = new JSObject();
+                response.put("uri", uri.toString());
+                response.put("bytesWritten", contentBytes.length);
+                response.put("verifiedBytes", savedBytes.length);
+                call.resolve(response);
+            } catch (Exception error) {
+                try { DocumentsContract.deleteDocument(getContext().getContentResolver(), uri); } catch (Exception ignored) {}
+                call.reject("Could not save/verify export file: " + error.getMessage(), error);
+            } finally {
+                if (finalStagedFile != null) finalStagedFile.delete();
+            }
+        });
     }
 
     // RUNTIME_LOG_DEDUP_PATCH

@@ -47,7 +47,9 @@ public class GameWebViewClient extends BridgeWebViewClient {
                 headers.put("X-Content-Type-Options", "nosniff");
                 return new WebResourceResponse("application/octet-stream", null, 200, "OK", headers, input);
             } catch (Exception error) {
-                return errorResponse(404, "Not Found", "Could not open external save");
+                // Only a successful lookup with no matching document is a definite 404.
+                // Provider/permission failures must remain distinguishable from user deletion.
+                return errorResponse(500, "Internal Server Error", "Could not open external save");
             }
         }
         if (encodedPath != null && encodedPath.startsWith(GAME_ASSET_PREFIX)) {

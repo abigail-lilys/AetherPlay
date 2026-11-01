@@ -61,6 +61,8 @@ export function PlayerPanel({
 }: PlayerPanelProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
+  // Keep one debugger session mounted while it is hidden for gameplay.
+  const [debugMountedForGame, setDebugMountedForGame] = useState<string | null>(null);
   const [screenOrientation, setScreenOrientation] = useState<GameScreenOrientation>(readScreenOrientation);
 
   useEffect(() => {
@@ -365,7 +367,14 @@ export function PlayerPanel({
             type="button"
             aria-label="打开游戏调试台"
             title={`调试：${activeGame.title}`}
-            onClick={() => setDebugOpen((open) => !open)}
+            onClick={() => {
+              if (debugMountedForGame === activeGame.id && debugOpen) {
+                setDebugOpen(false);
+              } else {
+                setDebugMountedForGame(activeGame.id);
+                setDebugOpen(true);
+              }
+            }}
             style={{
               position: "fixed",
               right: "14px",
@@ -384,11 +393,13 @@ export function PlayerPanel({
           >
             DEBUG
           </button>
-          {debugOpen ? (
+          {debugMountedForGame === activeGame.id ? (
             <GameDebugPanel
+              key={activeGame.id}
               gameId={activeGame.id}
               gameTitle={activeGame.title}
               frameRef={frameRef}
+              visible={debugOpen}
               onClose={() => setDebugOpen(false)}
             />
           ) : null}

@@ -21,7 +21,7 @@ interface AndroidFolderPickerAPI {
   writeGameSave(options: { treeUri: string; relativePath: string; data: string }): Promise<{ relativePath: string; bytesWritten: number; sha256: string }>;
   registerGameAssets(options: { gameId: string; append: boolean; files: Array<{ path: string; uri: string; mime: string }> }): Promise<{ registeredCount: number }>;
   appendRuntimeLog(options: { treeUri: string; content: string }): Promise<{ uri: string; trimmed: boolean; bytesWritten: number }>;
-  exportTextFile(options: { filename: string; content: string }): Promise<{ uri: string }>;
+  exportTextFile(options: { filename: string; content: string }): Promise<{ uri: string; bytesWritten: number; verifiedBytes: number }>;
 }
 
 const picker = registerPlugin<AndroidFolderPickerAPI>("AndroidFolderPicker");
@@ -71,7 +71,14 @@ export async function appendAndroidRuntimeLog(
 
 /** Save a diagnostic text file through Android's system document picker. */
 export async function saveAndroidTextFile(filename: string, content: string): Promise<string> {
+  if (typeof content !== "string" || content.length === 0) {
+    throw new Error("导出内容为空，已阻止创建 0B 文件。");
+  }
   const result = await picker.exportTextFile({ filename, content });
+  if (!result?.uri || !Number.isSafeInteger(result.bytesWritten) || result.bytesWritten <= 0 ||
+      result.verifiedBytes !== result.bytesWritten) {
+    throw new Error(`Android 文件导出未通过校验（写入 ${result?.bytesWritten ?? 0} B，读回 ${result?.verifiedBytes ?? 0} B）。`);
+  }
   return result.uri;
 }
 
