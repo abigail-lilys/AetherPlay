@@ -26,7 +26,7 @@ function sendInput(
   action: Action,
   down: boolean,
 ) {
-  const win = frame.current?.contentWindow;
+  const win = frame.current?.contentWindow as (Window & typeof globalThis) | null;
   if (!win) return;
 
   try {
