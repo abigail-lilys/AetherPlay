@@ -210,14 +210,38 @@ export function createPathRuntime(config) {
     return dir === "/" ? dir + base : trimTrailingSlash(String(dir).replace(/\\+/g, "/")) + "/" + base;
   }
 
+  function uniqueRootWasmManifestFile(path) {
+    // Resolve Emscripten /www/<name>.wasm requests safely.
+    const match = /^\/www\/([^/]+\.wasm)$/iu.exec(normalizePath(path));
+    if (!match) return null;
+
+    const requestedName = match[1].toLowerCase();
+    const candidates = new Map();
+
+    for (const file of config.files) {
+      const key = manifestKey(file.path);
+      const filename = key.slice(key.lastIndexOf("/") + 1).toLowerCase();
+
+      if (filename === requestedName) {
+        candidates.set(key.toLowerCase(), file);
+      }
+    }
+
+    return candidates.size === 1
+      ? candidates.values().next().value
+      : null;
+  }
+
   function lookupManifestFile(path) {
     for (const alias of manifestAliases(path)) {
       const exact = manifestFileByKey.get(alias);
       if (exact) return exact;
+
       const lower = manifestFileByKey.get(alias.toLowerCase());
       if (lower) return lower;
     }
-    return null;
+
+    return uniqueRootWasmManifestFile(path);
   }
 
   function manifestDirExists(path) {
