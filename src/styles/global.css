@@ -1243,8 +1243,7 @@ iframe:focus-visible {
 }
 
 
-
-/* AETHERPLAY_REFERENCE_GAMEPAD_V1 */
+/* AETHERPLAY_REMOVE_TEXTLOG_FULLSCREEN_V1 */
 @media (max-width: 860px), (orientation: landscape) and (pointer: coarse) {
   html, body, #root {
     width: 100% !important;
@@ -1267,10 +1266,6 @@ iframe:focus-visible {
     background: #000 !important;
   }
 
-  .app-shell.android-app.has-active-game > .library-panel {
-    display: none !important;
-  }
-
   .app-shell.android-app.has-active-game > .player-panel {
     position: absolute !important;
     inset: 0 !important;
@@ -1285,80 +1280,26 @@ iframe:focus-visible {
     background: #000 !important;
   }
 
-  /* Hide normal toolbar except floating Settings. */
+  /* 工具栏浮在画面上，不再占用游戏高度。 */
   .app-shell.android-app.has-active-game .player-toolbar {
     position: fixed !important;
     top: 8px !important;
     right: 10px !important;
     z-index: 10020 !important;
-    display: block !important;
     width: auto !important;
     min-height: 0 !important;
     padding: 0 !important;
     border: 0 !important;
     background: transparent !important;
-    pointer-events: none !important;
   }
 
   .app-shell.android-app.has-active-game .player-toolbar > div:first-child {
     display: none !important;
   }
 
-  .app-shell.android-app.has-active-game .player-toolbar .tool-buttons {
-    display: flex !important;
-    gap: 0 !important;
-    pointer-events: none !important;
-  }
-
-  .app-shell.android-app.has-active-game .player-toolbar .tool-buttons > button:not(.game-settings-button) {
-    display: none !important;
-  }
-
-  .app-shell.android-app.has-active-game .game-settings-button {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: auto !important;
-    min-width: 70px !important;
-    height: 42px !important;
-    min-height: 42px !important;
-    padding: 0 15px !important;
-    border: 1px solid rgba(255,255,255,.3) !important;
-    border-radius: 24px !important;
-    background: rgba(90,100,115,.62) !important;
-    color: #fff !important;
-    font-size: 14px !important;
-    pointer-events: auto !important;
-  }
-
-  .app-shell.android-app.has-active-game .game-settings-menu {
-    top: calc(100% + 7px) !important;
-    right: 0 !important;
-    z-index: 10030 !important;
-  }
-
-  .direction-mode-section {
-    display: grid;
-    gap: 6px;
-    padding-top: 4px;
-  }
-
-  .direction-mode-options {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-  }
-
-  .direction-mode-options button {
-    min-height: 38px;
-    padding: 4px 6px;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-
   .app-shell.android-app.has-active-game .player-scroll {
     display: flex !important;
-    flex: 1 1 auto !important;
+    flex: 1 1 0 !important;
     flex-direction: column !important;
     align-items: stretch !important;
     justify-content: stretch !important;
@@ -1372,43 +1313,39 @@ iframe:focus-visible {
     background: #000 !important;
   }
 
+  /* Text log 不再显示，也不再占据任何布局空间。 */
+  .app-shell.android-app.has-active-game .text-log-panel {
+    display: none !important;
+  }
+
+
   .app-shell.android-app.has-active-game .player-stage {
-    position: relative !important;
-    display: grid !important;
-    grid-template-columns: minmax(68px, 17.3vw) minmax(0, 1fr) minmax(68px, 17.3vw) !important;
-    grid-template-rows: minmax(0, 1fr) !important;
+    display: flex !important;
+    flex: 1 1 0 !important;
     align-items: stretch !important;
-    justify-items: stretch !important;
-    flex: 1 1 auto !important;
+    justify-content: stretch !important;
     width: 100% !important;
     height: 100% !important;
     min-width: 0 !important;
     min-height: 0 !important;
-    gap: 2px !important;
-    padding: 2px !important;
-    overflow: hidden !important;
-    background: #000 !important;
+    padding: 0 !important;
+    gap: 0 !important;
   }
 
   .app-shell.android-app.has-active-game .player-stage .frame-wrap {
-    grid-column: 2 !important;
-    grid-row: 1 !important;
-    display: grid !important;
-    place-items: center !important;
-    justify-self: center !important;
-    align-self: center !important;
-    flex: 0 1 auto !important;
-    width: min(100%, calc(100dvh * var(--game-aspect-ratio))) !important;
-    height: auto !important;
+    display: block !important;
+    flex: 1 1 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
     max-width: 100% !important;
     max-height: 100% !important;
-    aspect-ratio: var(--game-aspect-ratio) !important;
+    aspect-ratio: auto !important;
     margin: 0 !important;
     padding: 0 !important;
     border: 0 !important;
     border-radius: 0 !important;
-    overflow: hidden !important;
-    background: #000 !important;
   }
 
   .app-shell.android-app.has-active-game .player-stage .frame-wrap iframe {
@@ -1418,275 +1355,6 @@ iframe:focus-visible {
     min-width: 0 !important;
     min-height: 0 !important;
     border: 0 !important;
-    background: #000 !important;
   }
 
-  .virtual-control-panel {
-    display: grid !important;
-    align-self: stretch !important;
-    min-width: 0 !important;
-    min-height: 0 !important;
-    height: 100% !important;
-    gap: 2px !important;
-    padding: 0 !important;
-    overflow: hidden !important;
-    background: #000 !important;
-  }
-
-  .virtual-control-left {
-    grid-column: 1 !important;
-    grid-row: 1 !important;
-    grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: 30fr 70fr !important;
-  }
-
-  .virtual-control-right {
-    grid-column: 3 !important;
-    grid-row: 1 !important;
-    grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: 30fr 30fr 40fr !important;
-  }
-
-  .virtual-control-item {
-    box-sizing: border-box !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 100% !important;
-    height: 100% !important;
-    min-width: 0 !important;
-    min-height: 0 !important;
-    margin: 0 !important;
-    padding: 4px !important;
-    border: 1px solid #344a4a !important;
-    border-radius: 8px !important;
-    background: #f5f5f5 !important;
-    color: #222 !important;
-    font-size: clamp(12px, 2.4vw, 19px) !important;
-    font-weight: 600 !important;
-    line-height: 1.15 !important;
-    touch-action: none !important;
-    user-select: none !important;
-    -webkit-user-select: none !important;
-    -webkit-touch-callout: none !important;
-  }
-
-  .virtual-control-item:active {
-    background: #dce3e3 !important;
-  }
-
-  .virtual-hold-icon {
-    display: block;
-    margin-bottom: 4px;
-    font-size: clamp(28px, 5vw, 48px);
-    line-height: 1;
-  }
-
-  .virtual-dpad-mode-label {
-    margin-top: 4px;
-    color: #333;
-    font-size: clamp(10px, 1.8vw, 15px);
-    font-weight: 700;
-  }
-  .virtual-direction-area {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-  }
-
-  .virtual-dpad-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    grid-template-rows: repeat(3, minmax(0, 1fr));
-    place-items: center;
-    width: min(88%, 190px);
-    aspect-ratio: 1;
-    max-height: 78%;
-    touch-action: none;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-
-  .virtual-arrow,
-  .virtual-dpad-mark,
-  .virtual-dpad-center {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-    min-height: 0;
-    padding: 0 !important;
-    border: 0 !important;
-    border-radius: 8px !important;
-    background: transparent !important;
-    color: #333 !important;
-    font-size: clamp(18px, 4.3vw, 34px) !important;
-    font-weight: 800 !important;
-    line-height: 1 !important;
-    touch-action: none !important;
-  }
-
-  .virtual-arrow:active {
-    background: #d5dddd !important;
-  }
-
-  .virtual-arrow.up, .virtual-dpad-mark.up {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .virtual-arrow.left, .virtual-dpad-mark.left {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .virtual-dpad-center {
-    grid-column: 2;
-    grid-row: 2;
-    opacity: .8;
-  }
-
-  .virtual-arrow.right, .virtual-dpad-mark.right {
-    grid-column: 3;
-    grid-row: 2;
-  }
-
-  .virtual-arrow.down, .virtual-dpad-mark.down {
-    grid-column: 2;
-    grid-row: 3;
-  }
-
-  .virtual-dpad-grid.drag {
-    cursor: grab;
-    touch-action: none;
-  }
-
-  .virtual-action-key {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 42px;
-    min-height: 36px;
-    padding: 4px 8px;
-    border: 2px solid #222;
-    border-radius: 9px;
-    background: #fff;
-    color: #111;
-    font-size: clamp(12px, 2vw, 17px);
-    font-weight: 700;
-  }
-
-  .virtual-enter-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 62px;
-    height: 62px;
-    border: 3px solid #222;
-    border-radius: 15px;
-    background: #fff;
-    color: #111;
-    font-size: clamp(30px, 5vw, 43px);
-    font-weight: 800;
-    line-height: 1;
-  }
-
-  /* Closed Text log becomes a floating bubble, not a white footer. */
-  .app-shell.android-app.has-active-game .text-log-panel {
-    position: fixed !important;
-    top: 32% !important;
-    right: 14px !important;
-    z-index: 10010 !important;
-    display: grid !important;
-    grid-template-rows: auto minmax(0, 1fr) !important;
-    flex: none !important;
-    width: auto !important;
-    min-width: 0 !important;
-    min-height: 0 !important;
-    max-width: min(90vw, 380px) !important;
-    max-height: none !important;
-    padding: 0 !important;
-    border: 0 !important;
-    border-radius: 24px !important;
-    background: transparent !important;
-    overflow: visible !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-header {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 54px !important;
-    height: 54px !important;
-    min-height: 54px !important;
-    padding: 0 !important;
-    border: 0 !important;
-    border-radius: 50% !important;
-    background: rgba(80,85,92,.52) !important;
-    color: #fff !important;
-    font-size: 14px !important;
-    text-align: center !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-header > span:first-child {
-    font-size: 0 !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-header > span:first-child .icon {
-    display: none !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-header > span:first-child::after {
-    content: "log";
-    font-size: 14px;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-header > span:last-child {
-    display: none !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-list {
-    display: none;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-panel.open {
-    top: auto !important;
-    right: 10px !important;
-    bottom: calc(70px + env(safe-area-inset-bottom, 0px)) !important;
-    width: min(90vw, 380px) !important;
-    max-height: 42dvh !important;
-    border: 1px solid #d1d5db !important;
-    border-radius: 10px !important;
-    background: #fff !important;
-    box-shadow: 0 6px 24px rgba(0,0,0,.28);
-    overflow: hidden !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-panel.open .text-log-header {
-    justify-content: space-between !important;
-    width: 100% !important;
-    height: 40px !important;
-    min-height: 40px !important;
-    padding: 0 12px !important;
-    border-radius: 0 !important;
-    background: #fff !important;
-    color: #555 !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-panel.open .text-log-header > span:first-child {
-    font-size: 12px !important;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-panel.open .text-log-header > span:first-child::after {
-    content: none;
-  }
-
-  .app-shell.android-app.has-active-game .text-log-panel.open .text-log-list {
-    display: flex !important;
-    min-height: 0 !important;
-    overflow: auto !important;
-  }
 }

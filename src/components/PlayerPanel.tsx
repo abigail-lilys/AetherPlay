@@ -3,25 +3,12 @@ import { playUrl } from "@/src/lib/playerUrls";
 import { logDiagnostic } from "@/src/lib/diagnostics";
 import type { GameRecord } from "@/src/lib/types";
 import { Icon } from "@/src/components/Icon";
-import { TextLogPanel } from "@/src/components/TextLogPanel";
 import { GameDebugPanel } from "@/src/components/GameDebugPanel";
 import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/lib/androidOrientation";
 import { setAndroidImmersive } from "@/src/lib/androidImmersive";
-import { VirtualGameControls, type DirectionPadMode } from "@/src/components/VirtualGameControls";
 
 const githubUrl = "https://github.com/popupie/mv-mz-browser-player";
 const SCREEN_ORIENTATION_KEY = "local-web-game-player-screen-orientation-v1";
-const DIRECTION_PAD_MODE_KEY = "aetherplay-direction-pad-mode-v1";
-
-function readDirectionPadMode(): DirectionPadMode {
-  try {
-    return localStorage.getItem(DIRECTION_PAD_MODE_KEY) === "drag"
-      ? "drag"
-      : "instant";
-  } catch {
-    return "instant";
-  }
-}
 
 function readScreenOrientation(): GameScreenOrientation {
   try {
@@ -39,7 +26,6 @@ interface PlayerPanelProps {
   frameRef: RefObject<HTMLIFrameElement | null>;
   frameWrapRef: RefObject<HTMLDivElement | null>;
   gameAspectRatio: number;
-  logsOpen: boolean;
   overlayAvailable: boolean;
   onIframeLoad: () => void;
   onRequestFullscreen: () => void;
@@ -47,9 +33,6 @@ interface PlayerPanelProps {
   onToggleShow: (game: GameRecord) => void;
   resetRuntimeError: () => void;
   runtimeError: string | null;
-  setLogsOpen: (open: boolean | ((open: boolean) => boolean)) => void;
-  textLogLimit: number;
-  textLogs: string[];
 }
 
 export function PlayerPanel({
@@ -58,7 +41,6 @@ export function PlayerPanel({
   frameRef,
   frameWrapRef,
   gameAspectRatio,
-  logsOpen,
   overlayAvailable,
   onIframeLoad,
   onRequestFullscreen,
@@ -67,16 +49,12 @@ export function PlayerPanel({
   onToggleShow,
   resetRuntimeError,
   runtimeError,
-  setLogsOpen,
-  textLogLimit,
-  textLogs,
 }: PlayerPanelProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   // Keep one debugger session mounted while it is hidden for gameplay.
   const [debugMountedForGame, setDebugMountedForGame] = useState<string | null>(null);
   const [screenOrientation, setScreenOrientation] = useState<GameScreenOrientation>(readScreenOrientation);
-  const [directionPadMode, setDirectionPadMode] = useState<DirectionPadMode>(readDirectionPadMode);
 
   useEffect(() => {
     if (activeGame) {
@@ -107,14 +85,6 @@ export function PlayerPanel({
       void setAndroidImmersive(false).catch(() => undefined);
     };
   }, [Boolean(activeGame)]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(DIRECTION_PAD_MODE_KEY, directionPadMode);
-    } catch {
-      // Storage may be unavailable in embedded WebView.
-    }
-  }, [directionPadMode]);
 
   return (
     <section
@@ -191,8 +161,7 @@ export function PlayerPanel({
                 <div className="home-control-cell">
                   <Icon name="layers" />
                   <span>
-                    Overlay captures text or sprite-font dialogue for selection
-                    and the text log.
+                    Overlay captures text or sprite-font dialogue for selection.
                   </span>
                 </div>
 
@@ -325,21 +294,6 @@ export function PlayerPanel({
                   <button type="button" aria-pressed={screenOrientation === "portrait"} onClick={() => setScreenOrientation("portrait")}>竖屏</button>
                   <button type="button" aria-pressed={screenOrientation === "system"} onClick={() => setScreenOrientation("system")}>跟随系统</button>
                 </div>
-                <div className="direction-mode-section">
-                  <strong>方向键操作方式</strong>
-                  <div className="direction-mode-options">
-                    <button type="button"
-                      aria-pressed={directionPadMode === "instant"}
-                      onClick={() => setDirectionPadMode("instant")}>
-                      即反応式
-                    </button>
-                    <button type="button"
-                      aria-pressed={directionPadMode === "drag"}
-                      onClick={() => setDirectionPadMode("drag")}>
-                      ドラッグ式
-                    </button>
-                  </div>
-                </div>
                 <button
                   type="button"
                   className="exit-game-button"
@@ -366,11 +320,6 @@ export function PlayerPanel({
               </div>
             )}
             <div className="player-stage">
-              <VirtualGameControls
-                side="left"
-                frameRef={frameRef}
-                directionMode={directionPadMode}
-              />
               <div
                 ref={frameWrapRef}
                 className="frame-wrap"
@@ -390,20 +339,8 @@ export function PlayerPanel({
                   onLoad={onIframeLoad}
                 />
               </div>
-              <VirtualGameControls
-                side="right"
-                frameRef={frameRef}
-                directionMode={directionPadMode}
-              />
             </div>
-            {overlayAvailable && (
-              <TextLogPanel
-                logsOpen={logsOpen}
-                setLogsOpen={setLogsOpen}
-                textLogLimit={textLogLimit}
-                textLogs={textLogs}
-              />
-            )}
+
           </div>
         </>
       )}

@@ -104,7 +104,6 @@ export default function App() {
         frameRef={player.frameRef}
         frameWrapRef={player.frameWrapRef}
         gameAspectRatio={player.gameAspectRatio}
-        logsOpen={controller.logsOpen}
         overlayAvailable={controller.overlayAvailable}
         onIframeLoad={controller.handleIframeLoad}
         onRequestFullscreen={() =>
@@ -118,9 +117,6 @@ export default function App() {
         }
         resetRuntimeError={controller.resetRuntimeError}
         runtimeError={controller.runtimeError}
-        setLogsOpen={controller.setLogsOpen}
-        textLogLimit={controller.textLogLimit}
-        textLogs={controller.textLogs}
       />
     </main>
   );
