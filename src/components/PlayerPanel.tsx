@@ -372,6 +372,7 @@ export function PlayerPanel({
               fontWeight: 800,
               letterSpacing: "0.04em",
               boxShadow: "0 4px 18px rgba(0,0,0,.35)",
+              opacity: 0.07,
             }}
           >
             DEBUG
