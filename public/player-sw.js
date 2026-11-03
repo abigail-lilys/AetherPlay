@@ -1159,6 +1159,64 @@ async function serveGameFile(url, request) {
 
   const path = requestedPath || game.entryPath || "index.html";
   const match = await getStoredFileMatch(gameId, path);
+
+  // AETHERPLAY_ANDROID_SAF_MISS_FALLBACK_V1:
+  // If the IndexedDB path index misses an Android-folder asset, ask the
+  // already-registered native SAF route for the exact path. Keep HTML and
+  // rewritten bridge/config files on the normal path so injectBridge() and
+  // compatibility transforms are never bypassed.
+  if (
+    !match &&
+    game.sourceKind === "android-folder" &&
+    !request.headers.has("Range") &&
+    !/\.html?$/iu.test(path) &&
+    !isTyranoConfigPath(path) &&
+    !isSteam4C2BridgePath(path)
+  ) {
+    const nativeUrl = new URL(
+      `/__game__/${encodeURIComponent(gameId)}/${encodedPath(path)}`,
+      self.location.origin,
+    );
+    const nativeResponse = await fetch(nativeUrl.toString(), {
+      method: request.method,
+      cache: "no-store",
+    });
+
+    // A definite native 404 means the asset is genuinely absent; preserve the
+    // existing source-map / plugin-marker / File not found handling below.
+    if (nativeResponse.status !== 404) {
+      console.info("[AetherPlay] Android SAF fallback:", path, nativeResponse.status);
+      const nativeHeaders = new Headers(nativeResponse.headers);
+      nativeHeaders.set("Cache-Control", "no-store");
+      const inferredMime = mimeForStoredGamePath(path);
+      const nativeMime = nativeHeaders.get("Content-Type") || "";
+      if (
+        (!nativeMime || /^application\/octet-stream(?:\s*;.*)?$/iu.test(nativeMime)) &&
+        inferredMime
+      ) {
+        nativeHeaders.set("Content-Type", inferredMime);
+      }
+
+      if (request.method === "HEAD") {
+        return new Response(null, {
+          status: nativeResponse.status,
+          statusText: nativeResponse.statusText || "OK",
+          headers: nativeHeaders,
+        });
+      }
+      return new Response(nativeResponse.body, {
+        status: nativeResponse.status,
+        statusText: nativeResponse.statusText || "OK",
+        headers: nativeHeaders,
+      });
+    }
+    try {
+      await nativeResponse.body?.cancel();
+    } catch {
+      // Ignore cleanup errors for the discarded native 404 body.
+    }
+  }
+
   if (!match) {
     if (path.endsWith(".map")) {
       return new Response(
