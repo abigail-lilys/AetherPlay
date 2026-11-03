@@ -1160,19 +1160,31 @@ async function serveGameFile(url, request) {
   const path = requestedPath || game.entryPath || "index.html";
   const match = await getStoredFileMatch(gameId, path);
 
-  // AETHERPLAY_ANDROID_SAF_MISS_FALLBACK_V1:
-  // If the IndexedDB path index misses an Android-folder asset, ask the
-  // already-registered native SAF route for the exact path. Keep HTML and
-  // rewritten bridge/config files on the normal path so injectBridge() and
-  // compatibility transforms are never bypassed.
-  if (
+  // AETHERPLAY_ANDROID_SAF_DIAGNOSTICS_V1: expose why the SAF fallback is or is not selected.
+  const androidSafFallbackEligible =
     !match &&
     game.sourceKind === "android-folder" &&
     !request.headers.has("Range") &&
     !/\.html?$/iu.test(path) &&
     !isTyranoConfigPath(path) &&
-    !isSteam4C2BridgePath(path)
-  ) {
+    !isSteam4C2BridgePath(path);
+
+  console.info("[AetherPlay] SAF route decision:", {
+    gameId,
+    path,
+    sourceKind: game.sourceKind ?? null,
+    indexedDbMatch: Boolean(match),
+    matchedPath: match?.matchedPath ?? null,
+    storageKind: match?.record?.storageKind ?? null,
+    fallbackEligible: androidSafFallbackEligible,
+  });
+
+  // AETHERPLAY_ANDROID_SAF_MISS_FALLBACK_V1:
+  // If the IndexedDB path index misses an Android-folder asset, ask the
+  // already-registered native SAF route for the exact path. Keep HTML and
+  // rewritten bridge/config files on the normal path so injectBridge() and
+  // compatibility transforms are never bypassed.
+  if (androidSafFallbackEligible) {
     const nativeUrl = new URL(
       `/__game__/${encodeURIComponent(gameId)}/${encodedPath(path)}`,
       self.location.origin,
@@ -1180,6 +1192,15 @@ async function serveGameFile(url, request) {
     const nativeResponse = await fetch(nativeUrl.toString(), {
       method: request.method,
       cache: "no-store",
+    });
+
+    // Log both success and 404: absence of the success log alone is ambiguous.
+    console.info("[AetherPlay] SAF fallback native response:", {
+      gameId,
+      path,
+      status: nativeResponse.status,
+      ok: nativeResponse.ok,
+      contentType: nativeResponse.headers.get("Content-Type"),
     });
 
     // A definite native 404 means the asset is genuinely absent; preserve the
