@@ -1159,6 +1159,8 @@ async function serveGameFile(url, request) {
 
   const path = requestedPath || game.entryPath || "index.html";
   const match = await getStoredFileMatch(gameId, path);
+  // AETHERPLAY_SAF_HTTP_DIAGNOSTICS_V2: visible diagnostics, not SW console-only.
+  let androidSafFallbackNativeStatus = null;
 
   // AETHERPLAY_ANDROID_SAF_DIAGNOSTICS_V1: expose why the SAF fallback is or is not selected.
   const androidSafFallbackEligible =
@@ -1193,6 +1195,7 @@ async function serveGameFile(url, request) {
       method: request.method,
       cache: "no-store",
     });
+    androidSafFallbackNativeStatus = nativeResponse.status;
 
     // Log both success and 404: absence of the success log alone is ambiguous.
     console.info("[AetherPlay] SAF fallback native response:", {
@@ -1260,7 +1263,22 @@ async function serveGameFile(url, request) {
         },
       });
     }
-    return new Response("File not found", { status: 404 });
+    return new Response(JSON.stringify({
+      code: "AETHERPLAY_SAF_INDEXEDDB_MISS",
+      gameId,
+      path,
+      sourceKind: game.sourceKind ?? null,
+      indexedDbMatch: Boolean(match),
+      fallbackEligible: !match && game.sourceKind === "android-folder",
+      fallbackNativeStatus: androidSafFallbackNativeStatus,
+    }), {
+      status: 404,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-AetherPlay-Diagnostic": "indexeddb-miss",
+      },
+    });
   }
 
   const record = match.record;
@@ -1284,6 +1302,34 @@ async function serveGameFile(url, request) {
       method: request.method,
       cache: "no-store",
     });
+    if (!nativeResponse.ok) {
+      let nativeErrorBody = "";
+      try {
+        nativeErrorBody = (await nativeResponse.clone().text()).slice(0, 500);
+      } catch (error) {
+        nativeErrorBody = String(error);
+      }
+      return new Response(JSON.stringify({
+        code: "AETHERPLAY_SAF_NATIVE_STREAM_FAILED",
+        gameId,
+        path,
+        sourceKind: game.sourceKind ?? null,
+        indexedDbMatch: true,
+        matchedPath: match.matchedPath ?? null,
+        storageKind: record.storageKind ?? null,
+        exactPathMatch: isExactAssetRequestMatch(match),
+        nativeStatus: nativeResponse.status,
+        nativeStatusText: nativeResponse.statusText || "",
+        nativeBody: nativeErrorBody,
+      }), {
+        status: nativeResponse.status,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-AetherPlay-Diagnostic": "native-stream-failed",
+        },
+      });
+    }
     const nativeHeaders = new Headers(nativeResponse.headers);
     nativeHeaders.set("Cache-Control", "no-store");
     const inferredMime = mimeForStoredGamePath(record.path);
@@ -1307,6 +1353,26 @@ async function serveGameFile(url, request) {
       record.storageKind === "session-file"
         ? "Folder session expired."
         : "File body not found";
+    if (record.storageKind === "android-folder") {
+      return new Response(JSON.stringify({
+        code: "AETHERPLAY_SAF_ANDROID_BLOB_READ_FAILED",
+        gameId,
+        path,
+        sourceKind: game.sourceKind ?? null,
+        indexedDbMatch: true,
+        matchedPath: match.matchedPath ?? null,
+        storageKind: record.storageKind,
+        recordPath: record.path,
+        message,
+      }), {
+        status: 404,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-AetherPlay-Diagnostic": "android-blob-read-failed",
+        },
+      });
+    }
     return new Response(message, { status: 404 });
   }
 

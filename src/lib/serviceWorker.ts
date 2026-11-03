@@ -1,5 +1,5 @@
 // AETHER_SW_INDEXEDDB_VERSION_FIX_V1
-const PLAYER_SERVICE_WORKER_VERSION = "player-sw-14";
+const PLAYER_SERVICE_WORKER_VERSION = "player-sw-15";
 
 export async function registerPlayerServiceWorker(): Promise<
   ServiceWorkerRegistration | undefined
