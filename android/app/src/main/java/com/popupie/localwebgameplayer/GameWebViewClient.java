@@ -1,5 +1,6 @@
 package com.popupie.localwebgameplayer;
 
+import android.content.Context;
 import android.net.Uri;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -52,44 +53,86 @@ public class GameWebViewClient extends BridgeWebViewClient {
                 return errorResponse(500, "Internal Server Error", "Could not open external save");
             }
         }
-        if (encodedPath != null && encodedPath.startsWith(GAME_ASSET_PREFIX)) {
-            try {
-                String[] parts = encodedPath.substring(GAME_ASSET_PREFIX.length()).split("/", -1);
-                if (parts.length < 2) return errorResponse(400, "Bad Request", "Invalid game asset URL");
-                String gameId = Uri.decode(parts[0]);
-                StringBuilder relativePath = new StringBuilder();
-                for (int index = 1; index < parts.length; index++) {
-                    String part = Uri.decode(parts[index]);
-                    if (part.isEmpty()) continue;
-                    if (".".equals(part) || "..".equals(part)
-                            || part.indexOf('/') >= 0 || part.indexOf('\\') >= 0) {
-                        return errorResponse(400, "Bad Request", "Invalid game asset path");
-                    }
-                    if (relativePath.length() > 0) relativePath.append('/');
-                    relativePath.append(part);
-                }
-                AndroidFolderPickerPlugin.RegisteredGameAsset asset =
-                    AndroidFolderPickerPlugin.findRegisteredGameAsset(gameId, relativePath.toString());
-                if (asset == null) return errorResponse(404, "Not Found", "Game asset not registered");
-
-                InputStream input = view.getContext().getContentResolver()
-                    .openInputStream(Uri.parse(asset.uri));
-                if (input == null) return errorResponse(404, "Not Found", "Game asset is unavailable");
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Access-Control-Allow-Origin", "*");
-                headers.put("Cache-Control", "no-store");
-                headers.put("X-Content-Type-Options", "nosniff");
-                String mime = asset.mime == null || asset.mime.isEmpty()
-                    ? "application/octet-stream" : asset.mime;
-                return new WebResourceResponse(mime, null, 200, "OK", headers, input);
-            } catch (Exception error) {
-                return errorResponse(404, "Not Found", "Could not open game asset");
-            }
-        }
+        WebResourceResponse gameAssetResponse = interceptAndroidGameAsset(view.getContext(), request);
+        if (gameAssetResponse != null) return gameAssetResponse;
         return super.shouldInterceptRequest(view, request);
     }
 
-    private WebResourceResponse errorResponse(int status, String reason, String message) {
+    // AETHERPLAY_ANDROID_SAF_STREAM_V1: shared by WebViewClient and ServiceWorkerClient.
+    // The InputStream is passed directly to WebView; file bytes never enter a Base64 bridge.
+    static WebResourceResponse interceptAndroidGameAsset(Context context, WebResourceRequest request) {
+        if (request == null || request.getUrl() == null) return null;
+        String encodedPath = request.getUrl().getEncodedPath();
+        if (encodedPath == null || !encodedPath.startsWith(GAME_ASSET_PREFIX)) return null;
+
+        try {
+            String method = request.getMethod();
+            if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
+                return errorResponse(405, "Method Not Allowed", "Unsupported game asset method");
+            }
+            String[] parts = encodedPath.substring(GAME_ASSET_PREFIX.length()).split("/", -1);
+            if (parts.length < 2) return errorResponse(400, "Bad Request", "Invalid game asset URL");
+            String gameId = Uri.decode(parts[0]);
+            StringBuilder relativePath = new StringBuilder();
+            for (int index = 1; index < parts.length; index++) {
+                String part = Uri.decode(parts[index]);
+                if (part.isEmpty()) continue;
+                if (".".equals(part) || "..".equals(part)
+                        || part.indexOf('/') >= 0 || part.indexOf('\\') >= 0) {
+                    return errorResponse(400, "Bad Request", "Invalid game asset path");
+                }
+                if (relativePath.length() > 0) relativePath.append('/');
+                relativePath.append(part);
+            }
+            AndroidFolderPickerPlugin.RegisteredGameAsset asset =
+                AndroidFolderPickerPlugin.findRegisteredGameAsset(gameId, relativePath.toString());
+            if (asset == null) return errorResponse(404, "Not Found", "Game asset not registered");
+
+            String mime = mimeForRegisteredAsset(relativePath.toString(), asset.mime);
+            Map<String, String> headers = new HashMap<>();
+            headers.put("Access-Control-Allow-Origin", "*");
+            headers.put("Cache-Control", "no-store");
+            headers.put("X-Content-Type-Options", "nosniff");
+            headers.put("Accept-Ranges", "none");
+            if (asset.size > 0) headers.put("Content-Length", Long.toString(asset.size));
+            if ("HEAD".equalsIgnoreCase(method)) {
+                return new WebResourceResponse(mime, null, 200, "OK", headers,
+                    new ByteArrayInputStream(new byte[0]));
+            }
+
+            InputStream input = context.getContentResolver().openInputStream(Uri.parse(asset.uri));
+            if (input == null) return errorResponse(404, "Not Found", "Game asset is unavailable");
+            android.util.Log.i("AetherPlaySAF", "stream game=" + gameId + " path="
+                + relativePath + " size=" + asset.size);
+            return new WebResourceResponse(mime, null, 200, "OK", headers, input);
+        } catch (Exception error) {
+            android.util.Log.e("AetherPlaySAF", "Could not stream Android game asset", error);
+            return errorResponse(500, "Internal Server Error", "Could not open game asset");
+        }
+    }
+
+    private static String mimeForRegisteredAsset(String path, String declaredMime) {
+        String declared = declaredMime == null ? "" : declaredMime.trim();
+        if (!declared.isEmpty() && !declared.matches("(?i)(application|binary)/octet-stream")) {
+            return declared;
+        }
+        String lower = path.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
+        if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "text/javascript";
+        if (lower.endsWith(".css")) return "text/css";
+        if (lower.endsWith(".wasm")) return "application/wasm";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".xml") || lower.endsWith(".txt")) return "text/plain";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".ogg")) return "audio/ogg";
+        if (lower.endsWith(".mp3")) return "audio/mpeg";
+        if (lower.endsWith(".wav")) return "audio/wav";
+        return "application/octet-stream";
+    }
+
+    private static WebResourceResponse errorResponse(int status, String reason, String message) {
         Map<String, String> headers = new HashMap<>();
         headers.put("Cache-Control", "no-store");
         headers.put("Access-Control-Allow-Origin", "*");

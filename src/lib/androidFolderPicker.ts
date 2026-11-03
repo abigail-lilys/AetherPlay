@@ -19,7 +19,7 @@ interface AndroidFolderPickerAPI {
   readFile(options: { uri: string }): Promise<{ data: string }>;
   registerGameSaveRoot(options: { gameId: string; treeUri: string }): Promise<{ registered: boolean }>;
   writeGameSave(options: { treeUri: string; relativePath: string; data: string }): Promise<{ relativePath: string; bytesWritten: number; sha256: string }>;
-  registerGameAssets(options: { gameId: string; append: boolean; files: Array<{ path: string; uri: string; mime: string }> }): Promise<{ registeredCount: number }>;
+  registerGameAssets(options: { gameId: string; append: boolean; files: Array<{ path: string; uri: string; mime: string; size?: number }> }): Promise<{ registeredCount: number }>;
   appendRuntimeLog(options: { treeUri: string; content: string }): Promise<{ uri: string; trimmed: boolean; bytesWritten: number }>;
   exportTextFile(options: { filename: string; content: string }): Promise<{ uri: string; bytesWritten: number; verifiedBytes: number }>;
 }
@@ -83,10 +83,10 @@ export async function saveAndroidTextFile(filename: string, content: string): Pr
 }
 
 
-/** Register only asset metadata in Android. File bytes are streamed by WebViewClient on demand. */
+/** AETHERPLAY_ANDROID_SAF_STREAM_V1: register metadata only; native WebView callbacks stream file bytes. */
 export async function registerAndroidGameAssets(
   gameId: string,
-  files: Array<{ path: string; uri: string; mime: string }>,
+  files: Array<{ path: string; uri: string; mime: string; size?: number }>,
 ): Promise<number> {
   const batchSize = 250;
   let registeredCount = 0;
@@ -94,7 +94,7 @@ export async function registerAndroidGameAssets(
     const result = await picker.registerGameAssets({
       gameId,
       append: start > 0,
-      files: files.slice(start, start + batchSize),
+      files: files.slice(start, start + batchSize).map((file) => ({ ...file, size: Math.max(0, Number(file.size) || 0) })), // AETHERPLAY_ANDROID_SAF_STREAM_V1
     });
     registeredCount = result.registeredCount;
   }

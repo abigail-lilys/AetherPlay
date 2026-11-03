@@ -1,6 +1,6 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { Capacitor } from "@capacitor/core";
-import { chooseAndroidFolder } from "@/src/lib/androidFolderPicker";
+import { chooseAndroidFolder, registerAndroidGameAssets } from "@/src/lib/androidFolderPicker";
 import {
   bindSessionFolderCandidate,
   candidateFromAndroidFolder,
@@ -45,6 +45,7 @@ import {
   estimateStorage,
   getAllGames,
   getAndroidFolderHandle,
+  getStoredFilesForGame,
   updateGameSettings,
 } from "@/src/lib/storage";
 import {
@@ -71,6 +72,28 @@ function waitForNextPaint(): Promise<void> {
     }
     globalThis.setTimeout(resolve, 0);
   });
+}
+
+// AETHERPLAY_ANDROID_SAF_STREAM_V1: register URI metadata only; native code opens each file on demand.
+async function registerAndroidFolderGameAssets(gameId: string): Promise<void> {
+  const records = (await getStoredFilesForGame(gameId)).filter(
+    (record) => record.storageKind === "android-folder" && Boolean(record.storageRef),
+  );
+  if (records.length === 0) {
+    throw new Error("Android folder file index is empty. Re-link the game folder.");
+  }
+  const registeredCount = await registerAndroidGameAssets(
+    gameId,
+    records.map((record) => ({
+      path: record.path,
+      uri: record.storageRef,
+      mime: record.mime || "application/octet-stream",
+      size: record.size,
+    })),
+  );
+  if (registeredCount !== records.length) {
+    throw new Error(`Android native stream registration incomplete (${registeredCount}/${records.length}).`);
+  }
 }
 
 export function useGameLibrary(onImportStart?: () => void) {
@@ -209,6 +232,7 @@ export function useGameLibrary(onImportStart?: () => void) {
       await waitForNextPaint();
       const candidate = await candidateFromAndroidFolder(chosen);
       const game = await importAndroidFolderCandidate(candidate, setProgress);
+      await registerAndroidFolderGameAssets(game.id);
       clearServiceWorkerGameCache(game.id);
       await refreshGames(game.id);
       setProgress(idleProgress);
@@ -336,6 +360,7 @@ export function useGameLibrary(onImportStart?: () => void) {
           setError("Android folder link is missing. Choose the original folder again.");
           return;
         }
+        await registerAndroidFolderGameAssets(game.id);
       } catch {
         setError("Could not restore Android folder access. Choose the original folder again.");
         return;

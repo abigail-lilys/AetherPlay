@@ -36,10 +36,13 @@ public class AndroidFolderPickerPlugin extends Plugin {
     // REGISTERED_GAME_ASSETS_PATCH: one active game's metadata; no asset bytes are cached here.
     static final class RegisteredGameAsset {
         final String uri;
+        // AETHERPLAY_ANDROID_SAF_STREAM_V1: metadata only; bytes are opened lazily.
         final String mime;
-        RegisteredGameAsset(String uri, String mime) {
+        final long size;
+        RegisteredGameAsset(String uri, String mime, long size) {
             this.uri = uri;
             this.mime = mime;
+            this.size = Math.max(0L, size);
         }
     }
     private static final class GameAssetRegistry {
@@ -276,12 +279,13 @@ public class AndroidFolderPickerPlugin extends Plugin {
                 String path = normalizeGameAssetPath(item.optString("path", ""));
                 String uriValue = item.optString("uri", "");
                 String mime = item.optString("mime", "application/octet-stream");
+                long size = Math.max(0L, item.optLong("size", 0L));
                 if (path == null || uriValue.isEmpty()) continue;
                 Uri uri = Uri.parse(uriValue);
                 // Only URIs granted by Android's document picker are accepted.
                 if (!"content".equals(uri.getScheme())) continue;
                 if (mime == null || mime.isEmpty()) mime = "application/octet-stream";
-                next.put(path, new RegisteredGameAsset(uriValue, mime));
+                next.put(path, new RegisteredGameAsset(uriValue, mime, size));
             }
             if (next.isEmpty()) {
                 call.reject("No valid Android game asset URIs were registered");

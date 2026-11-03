@@ -1,6 +1,11 @@
 package com.popupie.localwebgameplayer;
 
 import android.os.Bundle;
+import android.os.Build;
+import android.webkit.ServiceWorkerClient;
+import android.webkit.ServiceWorkerController;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import androidx.activity.OnBackPressedCallback;
 import com.getcapacitor.BridgeActivity;
 
@@ -10,6 +15,17 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AndroidFolderPickerPlugin.class);
         registerPlugin(AndroidOrientationPlugin.class);
         registerPlugin(AndroidImmersivePlugin.class);
+        // AETHERPLAY_ANDROID_SAF_STREAM_V1: intercept Service Worker fetches too.
+        // Android's ServiceWorkerClient is separate from WebViewClient and is available on API 24+.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            final android.content.Context appContext = getApplicationContext();
+            ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                    return GameWebViewClient.interceptAndroidGameAsset(appContext, request);
+                }
+            });
+        }
         super.onCreate(savedInstanceState);
         this.bridge.setWebViewClient(new GameWebViewClient(this.bridge));
 

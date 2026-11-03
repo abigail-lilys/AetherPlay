@@ -1185,6 +1185,43 @@ async function serveGameFile(url, request) {
   }
 
   const record = match.record;
+
+  // AETHERPLAY_ANDROID_SAF_STREAM_V1: keep Android-folder bytes out of Base64/Blob copies.
+  // Exact-path reads that need no content rewriting are piped through the native ServiceWorkerClient.
+  const pathLooksHtml = /\.html?$/iu.test(record.path);
+  const canNativeStream =
+    record.storageKind === "android-folder" &&
+    isExactAssetRequestMatch(match) &&
+    !pathLooksHtml &&
+    !isTyranoConfigPath(record.path) &&
+    !isSteam4C2BridgePath(record.path) &&
+    !request.headers.has("Range");
+  if (canNativeStream) {
+    const nativeUrl = new URL(
+      `/__game__/${encodeURIComponent(gameId)}/${encodedPath(record.path)}`,
+      self.location.origin,
+    );
+    const nativeResponse = await fetch(nativeUrl.toString(), {
+      method: request.method,
+      cache: "no-store",
+    });
+    const nativeHeaders = new Headers(nativeResponse.headers);
+    nativeHeaders.set("Cache-Control", "no-store");
+    const inferredMime = mimeForStoredGamePath(record.path);
+    const nativeMime = nativeHeaders.get("Content-Type") || "";
+    if ((!nativeMime || /^application\/octet-stream(?:\s*;.*)?$/iu.test(nativeMime)) && inferredMime) {
+      nativeHeaders.set("Content-Type", inferredMime);
+    }
+    if (request.method === "HEAD") {
+      return new Response(null, { status: nativeResponse.status, headers: nativeHeaders });
+    }
+    return new Response(nativeResponse.body, {
+      status: nativeResponse.status,
+      statusText: nativeResponse.statusText || "OK",
+      headers: nativeHeaders,
+    });
+  }
+
   const blob = await getBlobForStoredRecord(gameId, record, request.clientId);
   if (!blob) {
     const message =
