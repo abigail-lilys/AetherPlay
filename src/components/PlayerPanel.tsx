@@ -360,19 +360,23 @@ export function PlayerPanel({
             }}
             style={{
               position: "fixed",
-              right: "14px",
-              bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
+              left: "calc(6px + env(safe-area-inset-left, 0px))",
+              top: "calc(6px + env(safe-area-inset-top, 0px))",
+              width: "42px",
+              height: "28px",
+              minWidth: "42px",
+              minHeight: "28px",
               zIndex: 99990,
               border: "1px solid #6aa8ef",
               borderRadius: 999,
-              padding: "10px 15px",
+              padding: "0 4px",
               background: "#1d4f85",
               color: "#fff",
-              fontSize: 12,
+              fontSize: 10,
               fontWeight: 800,
               letterSpacing: "0.04em",
               boxShadow: "0 4px 18px rgba(0,0,0,.35)",
-              opacity: 0.07,
+              opacity: 0.1,
             }}
           >
             DEBUG
