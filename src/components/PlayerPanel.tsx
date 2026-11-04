@@ -6,9 +6,15 @@ import { Icon } from "@/src/components/Icon";
 import { GameDebugPanel } from "@/src/components/GameDebugPanel";
 import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/lib/androidOrientation";
 import { setAndroidImmersive } from "@/src/lib/androidImmersive";
+import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
 
 const githubUrl = "https://github.com/popupie/mv-mz-browser-player";
 const SCREEN_ORIENTATION_KEY = "local-web-game-player-screen-orientation-v1";
+
+// AETHERPLAY_PGMMV_LOG_EXPORT_HOST_BRIDGE_V3
+type AetherPlayPgmmvLogExportWindow = Window & {
+  __AETHERPLAY_EXPORT_TEXT_FILE__?: (filename: string, content: string) => Promise<string>;
+};
 
 function readScreenOrientation(): GameScreenOrientation {
   try {
@@ -55,6 +61,36 @@ export function PlayerPanel({
   // Keep one debugger session mounted while it is hidden for gameplay.
   const [debugMountedForGame, setDebugMountedForGame] = useState<string | null>(null);
   const [screenOrientation, setScreenOrientation] = useState<GameScreenOrientation>(readScreenOrientation);
+
+  // AETHERPLAY_PGMMV_LOG_EXPORT_HOST_BRIDGE_V3:
+  // Keep native SAF calls in the top-level Capacitor page, not inside the game iframe.
+  useEffect(() => {
+    const exportHost = window as AetherPlayPgmmvLogExportWindow;
+    let pendingExport: Promise<string> | null = null;
+    const exportTextFile = (filename: string, content: string): Promise<string> => {
+      // Ignore duplicate requests while Android's document picker is still open.
+      if (pendingExport) return pendingExport;
+      if (!/^pgmmv-diagnostic-[0-9TZ-]+\.log$/i.test(filename)) {
+        return Promise.reject(new Error("Invalid PGMMV diagnostic filename."));
+      }
+      if (typeof content !== "string" || content.length === 0) {
+        return Promise.reject(new Error("Diagnostic log is empty."));
+      }
+      const operation = saveAndroidTextFile(filename, content);
+      const tracked = operation.finally(() => {
+        if (pendingExport === tracked) pendingExport = null;
+      });
+      pendingExport = tracked;
+      return tracked;
+    };
+    exportHost.__AETHERPLAY_EXPORT_TEXT_FILE__ = exportTextFile;
+
+    return () => {
+      if (exportHost.__AETHERPLAY_EXPORT_TEXT_FILE__ === exportTextFile) {
+        delete exportHost.__AETHERPLAY_EXPORT_TEXT_FILE__;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (activeGame) {
