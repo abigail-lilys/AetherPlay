@@ -59,8 +59,8 @@ describe("WOLF variable catalog metadata", () => {
     expect(get("string")?.variables.map((v) => [v.id, v.name, v.valueType])).toEqual([
       ["S0", "姓名", "string"], ["S1", "台词", "string"],
     ]);
-    expect(get("system-string")?.variables[0]).toMatchObject({ id: "SysS1", name: "系统提示", valueType: "string" });
-    expect(get("system-number")?.variables[0]).toMatchObject({ id: "Sys0", name: "所持金", valueType: "number" });
+    expect(get("system-db-string")?.variables[0]).toMatchObject({ id: "DBS0", name: "系统提示", valueType: "string" });
+    expect(get("system-db-number")?.variables[0]).toMatchObject({ id: "DBV0", name: "所持金", valueType: "number" });
     expect(get("normal")?.variables[0]).toMatchObject({ id: "V0", name: "HP", valueType: "number" });
     expect(get("spare-1")?.variables[0]).toMatchObject({ id: "V1-0", name: "金钱预备", valueType: "number" });
   });

@@ -3,7 +3,7 @@ import { playUrl } from "@/src/lib/playerUrls";
 import { logDiagnostic } from "@/src/lib/diagnostics";
 import type { GameRecord } from "@/src/lib/types";
 import { Icon } from "@/src/components/Icon";
-import { GameDebugPanel } from "@/src/components/GameDebugPanel";
+import { WolfVariableDebugger } from "@/src/components/WolfVariableDebugger";
 import { setAndroidScreenOrientation, type GameScreenOrientation } from "@/src/lib/androidOrientation";
 import { setAndroidImmersive } from "@/src/lib/androidImmersive";
 import { saveAndroidTextFile } from "@/src/lib/androidFolderPicker";
@@ -418,7 +418,7 @@ export function PlayerPanel({
             DEBUG
           </button>
           {debugMountedForGame === activeGame.id ? (
-            <GameDebugPanel
+            <WolfVariableDebugger
               key={activeGame.id}
               gameId={activeGame.id}
               gameTitle={activeGame.title}

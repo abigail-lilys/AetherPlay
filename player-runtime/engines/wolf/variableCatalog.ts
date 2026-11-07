@@ -338,8 +338,8 @@ export function parseCommonEventVariableGroups(input: Uint8Array, sourcePath: st
 
 const SYSTEM_VARIABLE_TYPE_MAP: Record<number, { id: string; title: string; valueType: WolfVariableValueType; description: string }> = {
   4: { id: "string", title: "字符串变量 S", valueType: "string", description: "S? · 游戏定义的字符串变量" },
-  5: { id: "system-string", title: "系统字符串变量 SysS", valueType: "string", description: "SysS? · 系统字符串变量" },
-  6: { id: "system-number", title: "系统变量 Sys", valueType: "number", description: "Sys? · 系统数值变量" },
+  5: { id: "system-db-string", title: "系统数据库字符串数据", valueType: "string", description: "System Database 项目中的字符串字段数据；不是内置 SysS 运行时变量。" },
+  6: { id: "system-db-number", title: "系统数据库数值数据", valueType: "number", description: "System Database 项目中的数值字段数据；不是内置 Sys 运行时变量。" },
   14: { id: "normal", title: "常规变量 V", valueType: "number", description: "V? · 常规数值变量" },
   15: { id: "spare-1", title: "预备变量 V1", valueType: "number", description: "V1-? · 第 1 组预备数值变量" },
   16: { id: "spare-2", title: "预备变量 V2", valueType: "number", description: "V2-? · 第 2 组预备数值变量" },
@@ -354,8 +354,8 @@ const SYSTEM_VARIABLE_TYPE_MAP: Record<number, { id: string; title: string; valu
 
 function variablePrefix(typeIndex: number): string {
   if (typeIndex === 4) return "S";
-  if (typeIndex === 5) return "SysS";
-  if (typeIndex === 6) return "Sys";
+  if (typeIndex === 5) return "DBS";
+  if (typeIndex === 6) return "DBV";
   if (typeIndex === 14) return "V";
   if (typeIndex >= 15 && typeIndex <= 23) return `V${typeIndex - 14}-`;
   return "Var";
@@ -369,7 +369,7 @@ function createVariableGroup(type: WolfDatabaseProjectType, sourcePath: string):
     const name = rawName.trim();
     // WOLF's system-string table is numbered from SysS1 (SysS0 is not a
     // regular editable user-visible system string); other tables are zero-based.
-    const id = type.index === 5 ? `SysS${index + 1}` : `${prefix}${index}`;
+    const id = `${prefix}${index}`;
     return {
       id, name: name || id,
       displayName: name ? `${id} · ${name}` : `${id} · 未命名`,

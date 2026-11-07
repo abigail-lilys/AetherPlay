@@ -32,6 +32,7 @@ import { resolveWolfHpPointerChain, writeWolfHpPointerChain, type WolfHpPointerC
 import { buildWolfVariableCatalog, type WolfVariableCatalog } from "@/player-runtime/engines/wolf/variableCatalog";
 import { evaluateSysTimeProgress, isPlausibleSysTimeTriple, matchesInt32Sequence, type SysTimeProgress, type SysTimeTriple } from "@/player-runtime/engines/wolf/sysVariableLocator";
 import { inspectWasmRuntimeSurface, summarizeWasmExports, summarizeWasmImports, type AetherRuntimeIntrospection } from "@/player-runtime/engines/wolf/runtimeIntrospection";
+import { WOLF_SYSTEM_VARIABLE_COUNT, WOLF_SYSTEM_VARIABLE_WRITABLE_IDS } from "@/player-runtime/engines/wolf/systemVariables";
 
 declare const Module: WolfRuntimeModule;
 declare const FS: {
@@ -61,13 +62,16 @@ let aetherDebugWolfVariableWatch: { base: number; count: number; buffer: ArrayBu
 type AetherDebugSysTimeCandidate = { base: number; signatureAddress: number; before: SysTimeTriple; sampledAtMs: number };
 type AetherDebugSysTimeBaseline = { gameId: string; buffer: ArrayBufferLike; memoryBytes: number; candidateCount: number; truncated: boolean; candidates: AetherDebugSysTimeCandidate[] };
 let aetherDebugSysTimeBaseline: AetherDebugSysTimeBaseline | undefined;
+// Sys writes require a unique Sys28-30 time signature and a verified full-range read in this live instance.
+let aetherDebugConfirmedSysVariableBase: { base: number; count: number; memoryBytes: number; buffer: ArrayBufferLike; gameId: string } | undefined;
+let aetherDebugVerifiedSysVariableBase: { base: number; count: number; memoryBytes: number; buffer: ArrayBufferLike; gameId: string } | undefined;
 
 // AetherPlay WOLF debug bridge. This snippet is inserted after activeModule is declared.
 type AetherDebugCommand = {
   type: "aetherplay-debug-command";
   requestId: string;
   gameId: string;
-  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "sys-time-feature-scan" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
+  command: "probe" | "runtime-introspect" | "address-trace" | "variable-catalog" | "wolf-variable-range-read" | "wolf-variable-base-detect" | "wolf-variable-write" | "wolf-variable-watch-start" | "wolf-variable-watch-stop" | "sys-variable-base-detect" | "sys-variable-range-read" | "sys-variable-write" | "sys-time-feature-scan" | "list-files" | "read-file" | "write-file" | "scan-first" | "scan-unknown-first" | "scan-next" | "scan-page" | "scan-reset" | "memory-read" | "memory-neighborhood" | "memory-write" | "freeze-add" | "freeze-remove" | "freeze-clear" | "hp-chain-read" | "hp-chain-write" | "wasm-binary-export";
   scanStartOffset?: number;
   scanEndOffset?: number;
   scanValue2?: number;
@@ -120,6 +124,7 @@ type AetherDebugResponse = {
   wolfVariableWrite?: { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number };
   wolfVariableWatch?: { base: number; count: number; startedAt: string; endedAt?: string; durationMs?: number; changes?: Array<{ id: number; before: number; after: number; delta: number }>; totalChanges?: number };
   sysVariables?: { base: number; count: number; memoryBytes: number; rows: Array<{ id: number; address: number; value: number }> };
+  sysVariableWrite?: { variableId: number; base: number; address: number; expectedValue: number; requestedValue: number; immediateValue: number; memoryBytes: number };
   sysVariableBaseDetection?: { startIndex: number; variableCount: number; signatureValues: number[]; memoryBytes: number; scannedBytes: number; candidateCount: number; truncated: boolean; candidates: Array<{ base: number; signatureAddress: number }> };
   sysTimeFeatureScan?: {
     phase: "baseline" | "compare" | "reset";
@@ -729,7 +734,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<AetherDebugCommand>;
   if (message.type !== "aetherplay-debug-command" || typeof message.requestId !== "string" || typeof message.gameId !== "string" || message.gameId !== config?.gameId) return;
   const command = message.command;
-  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "wolf-variable-watch-start" && command !== "wolf-variable-watch-stop" && command !== "sys-variable-base-detect" && command !== "sys-variable-range-read" && command !== "sys-time-feature-scan" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
+  if (!command || (command !== "probe" && command !== "runtime-introspect" && command !== "address-trace" && command !== "variable-catalog" && command !== "wolf-variable-range-read" && command !== "wolf-variable-base-detect" && command !== "wolf-variable-write" && command !== "wolf-variable-watch-start" && command !== "wolf-variable-watch-stop" && command !== "sys-variable-base-detect" && command !== "sys-variable-range-read" && command !== "sys-variable-write" && command !== "sys-time-feature-scan" && command !== "list-files" && command !== "read-file" && command !== "write-file" && command !== "scan-first" && command !== "scan-unknown-first" && command !== "scan-next" && command !== "scan-page" && command !== "scan-reset" && command !== "memory-read" && command !== "memory-neighborhood" && command !== "memory-write" && command !== "freeze-add" && command !== "freeze-remove" && command !== "freeze-clear" && command !== "hp-chain-read" && command !== "hp-chain-write" && command !== "wasm-binary-export")) return;
   try {
     if (command === "wasm-binary-export") {
       const bytes = aetherDebugCapturedWasmBytes;
@@ -827,32 +832,79 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       });
       return;
     }
-    // AETHER_WOLF_SYS_BASE_DETECT_V1: read-only locator for a contiguous Sys Int32 table.
+    // AETHER_WOLF_SYS_RANGE_V2: reads require a unique, time-verified Sys28-30 candidate.
     if (command === "sys-variable-range-read") {
       const base = Number(message.sysVariableBase);
       const count = Number(message.sysVariableCount);
       if (!Number.isSafeInteger(base) || base < 0 || base > 0xffffffff || base % 4 !== 0) {
-        throw new Error("Sys 候选基址必须是 4 字节对齐的非负 WASM32 地址。");
+        throw new Error("Sys 基址无效；必须是 4 字节对齐的 WASM32 地址。");
       }
-      if (!Number.isSafeInteger(count) || count < 1 || count > 256) {
-        throw new Error("Sys 变量数量必须是 1 至 256 之间的整数。请先读取 SysDataBase.project 获取实际数量。");
+      if (count !== WOLF_SYSTEM_VARIABLE_COUNT) {
+        throw new Error(`Sys 范围必须读取完整的 ${WOLF_SYSTEM_VARIABLE_COUNT} 个槽位，避免编号错位。`);
       }
       const buffer = aetherDebugGetMemoryBuffer();
-      if (!buffer || buffer.byteLength <= 0) throw new Error("当前 WASM 内存不可读；请等待游戏初始化后重试。");
+      const proof = aetherDebugConfirmedSysVariableBase;
+      if (!buffer || !proof || proof.gameId !== message.gameId || proof.base !== base || proof.count !== count || proof.buffer !== buffer || proof.memoryBytes !== buffer.byteLength) {
+        throw new Error("Sys 基址没有通过当前游戏实例的唯一 Sys28–Sys30 时间验证，或 WASM 内存已变化。请重新自动定位。");
+      }
       const end = base + count * 4;
       if (!Number.isSafeInteger(end) || end > buffer.byteLength) {
-        throw new Error(`Sys 候选范围超出当前 WASM 内存：基址 0x${base.toString(16).toUpperCase()}，数量 ${count}。未读取。`);
+        throw new Error("Sys 变量范围超出当前 WASM 内存；已拒绝读取。");
       }
       const view = new DataView(buffer);
       const rows = Array.from({ length: count }, (_, id) => ({ id, address: base + id * 4, value: view.getInt32(base + id * 4, true) }));
       if (aetherDebugGetMemoryBuffer() !== buffer) throw new Error("读取 Sys 变量期间 WASM 内存发生变化；请重新定位。");
+      aetherDebugVerifiedSysVariableBase = { ...proof };
       aetherDebugRespond({ type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId, command, ok: true, sysVariables: { base, count, memoryBytes: buffer.byteLength, rows } });
+      return;
+    }
+    // AETHER_WOLF_SYS_WRITE_V1: allow only documented writable Sys IDs, old-value checked.
+    if (command === "sys-variable-write") {
+      const variableId = Number(message.variableId);
+      const base = Number(message.sysVariableBase);
+      const count = Number(message.sysVariableCount);
+      const expectedValue = message.expectedValue;
+      const requestedValue = message.value;
+      if (!Number.isSafeInteger(variableId) || !WOLF_SYSTEM_VARIABLE_WRITABLE_IDS.has(variableId)) {
+        throw new Error("该 Sys 编号未被官方变量表明确标记为可写；为避免破坏游戏状态，拒绝修改。");
+      }
+      if (count !== WOLF_SYSTEM_VARIABLE_COUNT || !Number.isSafeInteger(base) || base < 0 || base % 4 !== 0 || base > 0xffffffff) {
+        throw new Error("Sys 基址或范围无效；请重新定位并读取完整变量表。");
+      }
+      if (typeof expectedValue !== "number" || !Number.isInteger(expectedValue) || expectedValue < -2147483648 || expectedValue > 2147483647) {
+        throw new Error("缺少有效的预期旧值；拒绝无旧值校验的写入。");
+      }
+      if (typeof requestedValue !== "number" || !Number.isInteger(requestedValue) || requestedValue < -2147483648 || requestedValue > 2147483647) {
+        throw new Error("Sys 新值必须是有效的 Int32 整数。");
+      }
+      const buffer = aetherDebugGetMemoryBuffer();
+      const proof = aetherDebugVerifiedSysVariableBase;
+      if (!buffer || !proof || proof.gameId !== message.gameId || proof.base !== base || proof.count !== count || proof.buffer !== buffer || proof.memoryBytes !== buffer.byteLength) {
+        throw new Error("当前 Sys 表尚未通过完整范围复读验证，或 WASM 内存已变化。请重新定位并读取变量表。");
+      }
+      const address = base + variableId * 4;
+      if (!Number.isSafeInteger(address) || address + 4 > buffer.byteLength) throw new Error("Sys 写入地址超出 WASM 内存范围。");
+      const view = new DataView(buffer);
+      const before = view.getInt32(address, true);
+      if (before !== expectedValue) throw new Error(`拒绝过期写入：Sys${variableId} 当前值为 ${before}，界面预期旧值为 ${expectedValue}。请先刷新。`);
+      view.setInt32(address, requestedValue, true);
+      const currentBuffer = aetherDebugGetMemoryBuffer();
+      if (!currentBuffer || currentBuffer !== buffer) throw new Error("写入后 WASM 内存发生变化；无法安全确认结果。");
+      const immediateValue = new DataView(currentBuffer).getInt32(address, true);
+      if (immediateValue !== requestedValue) throw new Error(`写入后回读不一致：请求 ${requestedValue}，实际 ${immediateValue}。`);
+      aetherDebugRespond({
+        type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
+        command, ok: true,
+        sysVariableWrite: { variableId, base, address, expectedValue, requestedValue, immediateValue, memoryBytes: currentBuffer.byteLength },
+      });
       return;
     }
     if (command === "sys-time-feature-scan") {
       const phase = message.sysTimePhase;
       if (phase === "reset") {
         aetherDebugSysTimeBaseline = undefined;
+        aetherDebugConfirmedSysVariableBase = undefined;
+        aetherDebugVerifiedSysVariableBase = undefined;
         aetherDebugRespond({
           type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
           command, ok: true,
@@ -862,12 +914,14 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       }
       if (phase === "baseline") {
         aetherDebugSysTimeBaseline = undefined;
+        aetherDebugConfirmedSysVariableBase = undefined;
+        aetherDebugVerifiedSysVariableBase = undefined;
         const buffer = aetherDebugGetMemoryBuffer();
         if (!buffer || buffer.byteLength < 256) throw new Error("当前 WASM 内存不可用或过小，请先启动游戏并重新探测运行时。");
         const memoryBytes = buffer.byteLength;
         const scanStartedAt = performance.now();
         const chunkBytes = 2 * 1024 * 1024;
-        const maxStoredCandidates = 5000;
+        const maxStoredCandidates = 2048;
         let candidateCount = 0;
         const candidates: AetherDebugSysTimeCandidate[] = [];
         // Sys28 address = candidate Sys0 base + 28 * 4. Require enough room
@@ -891,14 +945,7 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
             if (base < 0 || base % 4 !== 0 || base + 164 * 4 > memoryBytes) continue;
             candidateCount += 1;
             const sampledCandidate = { base, signatureAddress, before, sampledAtMs: performance.now() };
-            if (candidates.length < maxStoredCandidates) {
-              candidates.push(sampledCandidate);
-            } else {
-              // Reservoir sampling keeps candidate addresses representative across the entire
-              // WASM memory instead of retaining only the lowest-address matches.
-              const reservoirSlot = Math.floor(Math.random() * candidateCount);
-              if (reservoirSlot < maxStoredCandidates) candidates[reservoirSlot] = sampledCandidate;
-            }
+            if (candidates.length < maxStoredCandidates) candidates.push(sampledCandidate);
           }
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
@@ -947,11 +994,6 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
           if (matched) {
             candidateCount += 1;
             if (matches.length < 100) matches.push(resultRow);
-            else {
-              // Keep valid matches representative too if there are many of them.
-              const matchSlot = Math.floor(Math.random() * candidateCount);
-              if (matchSlot < 100) matches[matchSlot] = resultRow;
-            }
           }
           const diagnosticRow = { ...resultRow, matched };
           if (samples.length < 12) samples.push(diagnosticRow);
@@ -964,6 +1006,15 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
         const finalBuffer = aetherDebugGetMemoryBuffer();
         aetherDebugSysTimeBaseline = undefined;
         if (!finalBuffer || finalBuffer !== buffer) throw new Error("比较期间 WASM 内存发生变化；本次结果作废，请重新采集基线。");
+        if (candidateCount === 1 && matches.length === 1 && !baseline.truncated) {
+          aetherDebugConfirmedSysVariableBase = {
+            base: matches[0].base, count: WOLF_SYSTEM_VARIABLE_COUNT, memoryBytes: buffer.byteLength, buffer, gameId: message.gameId,
+          };
+          aetherDebugVerifiedSysVariableBase = undefined;
+        } else {
+          aetherDebugConfirmedSysVariableBase = undefined;
+          aetherDebugVerifiedSysVariableBase = undefined;
+        }
         aetherDebugRespond({
           type: "aetherplay-debug-result", requestId: message.requestId, gameId: message.gameId,
           command, ok: true,
