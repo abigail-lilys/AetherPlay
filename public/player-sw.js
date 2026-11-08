@@ -8,7 +8,7 @@ const WOLF_SAVE_STORE = "wolfSaves"; // AETHER_SW_WOLF_SAVE_STORE_V1
 
 const PLAYER_DESKTOP_RUNTIME_VERSION = "desktop-api-11";
 const PLAYER_BRIDGE_RUNTIME_VERSION = "bridge-api-14";
-const PLAYER_WOLF_RUNTIME_VERSION = "wolf-compat-11";
+const PLAYER_WOLF_RUNTIME_VERSION = "wolf-mtool-12";
 const SESSION_FILE_TIMEOUT_MS = 10000;
 const EMPTY_SOURCE_MAP_TEXT = '{"version":3,"sources":[],"mappings":""}';
 const RPG_MAKER_ENCRYPTED_HEADER_BYTES = Uint8Array.from([
@@ -43,8 +43,8 @@ const gameCache = new Map();
 const fileCache = new Map();
 const encryptionKeyCache = new Map();
 
-self.addEventListener("install", () => {
-  self.skipWaiting();
+self.addEventListener("install", (event) => {
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener("activate", (event) => {

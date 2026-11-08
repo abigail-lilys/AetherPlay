@@ -2258,8 +2258,38 @@ function loadWoditor(source: string): Promise<void> {
     const script = document.createElement("script");
     script.src = source;
     script.async = true;
+
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Could not load Browser Woditor: ${source}`));
+
+    script.onerror = () => {
+      const controllerURL =
+        navigator.serviceWorker?.controller?.scriptURL ?? "(none)";
+
+      const details = [
+        `requestedUrl: ${script.src}`,
+        `pageUrl: ${window.location.href}`,
+        `serviceWorkerController: ${controllerURL}`,
+        `serviceWorkerControlled: ${Boolean(
+          navigator.serviceWorker?.controller,
+        )}`,
+      ].join("\\n");
+
+      console.error(
+        "[AetherPlay] Browser Woditor script failed to load:",
+        details,
+      );
+
+      reject(
+        new Error(
+          [
+            "Could not load Browser Woditor.",
+            details,
+            "Note: script.onerror does not expose the HTTP status code.",
+          ].join("\\n"),
+        ),
+      );
+    };
+
     document.body.append(script);
   });
 }
