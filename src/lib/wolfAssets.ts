@@ -66,15 +66,53 @@ export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAss
   }
 
   const isAndroid = Capacitor.getPlatform() === "android";
-  const androidRecords = isAndroid ? records.filter((record) => record.storageKind === "android-folder") : [];
+
+  // AETHERPLAY_WOLF_ANDROID_FULL_REGISTRY_V1:
+  // The native registry also serves runtime files outside data/,
+  // including woditor.js and its lib/ dependencies.
+  // Never replace the full registry with the loose Data subset.
+  const androidRecords = isAndroid
+    ? allRecords.filter(
+        (record) =>
+          record.storageKind === "android-folder" &&
+          Boolean(record.storageRef),
+      )
+    : [];
+
   if (androidRecords.length > 0) {
-    const registeredCount = await registerAndroidGameAssets(gameId, androidRecords.map((record) => ({
-      path: normalizeStoredPath(record.path),
-      uri: record.storageRef,
-      mime: mimeForStoredWolfAsset(record.path, record.mime),
-    })));
+    const looseAndroidCount = records.filter(
+      (record) => record.storageKind === "android-folder",
+    ).length;
+
+    logDiagnostic("info", "wolf-assets.android-registry.register.start", {
+      gameId,
+      allFileCount: allRecords.length,
+      looseAssetCount: records.length,
+      androidRegistryCount: androidRecords.length,
+      looseAndroidCount,
+      nonLooseAndroidCount: androidRecords.length - looseAndroidCount,
+    });
+
+    const registeredCount = await registerAndroidGameAssets(
+      gameId,
+      androidRecords.map((record) => ({
+        path: normalizeStoredPath(record.path),
+        uri: record.storageRef,
+        mime: mimeForStoredWolfAsset(record.path, record.mime),
+        size: record.size,
+      })),
+    );
+
+    logDiagnostic("info", "wolf-assets.android-registry.register.complete", {
+      gameId,
+      expectedCount: androidRecords.length,
+      registeredCount,
+    });
+
     if (registeredCount !== androidRecords.length) {
-      throw new Error(`Android asset registration incomplete (${registeredCount}/${androidRecords.length}).`);
+      throw new Error(
+        `Android asset registration incomplete (${registeredCount}/${androidRecords.length}).`,
+      );
     }
   }
 
