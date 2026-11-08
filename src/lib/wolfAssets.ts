@@ -1,6 +1,5 @@
 import { Capacitor } from "@capacitor/core";
-import { detectMime } from "@/src/lib/mime"; // AETHER_ANDROID_MIME_FIX_V1
-import { readAndroidFolderFile, registerAndroidGameAssets } from "@/src/lib/androidFolderPicker";
+import { readAndroidFolderFile } from "@/src/lib/androidFolderPicker";
 import { diagnosticErrorText, logDiagnostic } from "@/src/lib/diagnostics";
 import { getSessionFolderFile } from "@/src/lib/sessionFiles";
 import { getStoredFilesForGame } from "@/src/lib/storage";
@@ -13,13 +12,6 @@ const FILE_READ_CONCURRENCY = 8;
 function isLooseWolfAsset(path: string): boolean {
   return normalizeStoredPath(path).toLowerCase().startsWith("data/");
 }
-// AETHER_ANDROID_MIME_FIX_V1: correct stale/generic MIME metadata for known file extensions.
-function mimeForStoredWolfAsset(path: string, storedMime?: string): string {
-  const detected = detectMime(path);
-  if (detected !== "application/octet-stream") return detected;
-  return storedMime || detected;
-}
-
 function encodedPath(path: string): string {
   return normalizeStoredPath(path).split("/").map(encodeURIComponent).join("/");
 }
@@ -67,58 +59,14 @@ export async function createWolfAssetObjectUrls(gameId: string): Promise<WolfAss
 
   const isAndroid = Capacitor.getPlatform() === "android";
 
-  // AETHERPLAY_WOLF_ANDROID_FULL_REGISTRY_V1:
-  // The native registry also serves runtime files outside data/,
-  // including woditor.js and its lib/ dependencies.
-  // Never replace the full registry with the loose Data subset.
-  const androidRecords = isAndroid
-    ? allRecords.filter(
-        (record) =>
-          record.storageKind === "android-folder" &&
-          Boolean(record.storageRef),
-      )
-    : [];
-
-  if (androidRecords.length > 0) {
-    const looseAndroidCount = records.filter(
-      (record) => record.storageKind === "android-folder",
-    ).length;
-
-    logDiagnostic("info", "wolf-assets.android-registry.register.start", {
-      gameId,
-      allFileCount: allRecords.length,
-      looseAssetCount: records.length,
-      androidRegistryCount: androidRecords.length,
-      looseAndroidCount,
-      nonLooseAndroidCount: androidRecords.length - looseAndroidCount,
-    });
-
-    const registeredCount = await registerAndroidGameAssets(
-      gameId,
-      androidRecords.map((record) => ({
-        path: normalizeStoredPath(record.path),
-        uri: record.storageRef,
-        mime: mimeForStoredWolfAsset(record.path, record.mime),
-        size: record.size,
-      })),
-    );
-
-    logDiagnostic("info", "wolf-assets.android-registry.register.complete", {
-      gameId,
-      expectedCount: androidRecords.length,
-      registeredCount,
-    });
-
-    if (registeredCount !== androidRecords.length) {
-      throw new Error(
-        `Android asset registration incomplete (${registeredCount}/${androidRecords.length}).`,
-      );
-    }
-  }
-
+  // Android assets were registered in useGameLibrary before the game
+  // becomes active. Do not register them again here: that duplicates
+  // 21 Capacitor bridge calls and can replace the native registry.
   const objectUrls: string[] = [];
   let materializedBytes = 0;
-  const androidCount = androidRecords.length;
+  const androidCount = isAndroid
+    ? records.filter((record) => record.storageKind === "android-folder").length
+    : 0;
   logDiagnostic("info", "wolf-assets.strategy.lazy-routes", {
     gameId,
     assetCount: records.length,
