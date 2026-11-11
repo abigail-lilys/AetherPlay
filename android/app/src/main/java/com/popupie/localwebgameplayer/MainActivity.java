@@ -50,6 +50,12 @@ public class MainActivity extends BridgeActivity {
             );
         }
 
+        // AETHERPLAY_COI_RELOAD_AFTER_CLIENT_INSTALL_V1
+        // BridgeActivity loads appUrl inside super.onCreate() before this
+        // subclass installs GameWebViewClient. Reload once so the top-level
+        // document is fetched through the COOP/COEP-aware client.
+        this.bridge.reload();
+
         // Consume Android navigation Back and edge-swipe while a game is active.
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
