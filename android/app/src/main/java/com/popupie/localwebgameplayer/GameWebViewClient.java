@@ -54,8 +54,10 @@ public class GameWebViewClient extends BridgeWebViewClient {
             }
         }
         WebResourceResponse gameAssetResponse = interceptAndroidGameAsset(view.getContext(), request);
-        if (gameAssetResponse != null) return gameAssetResponse;
-        return super.shouldInterceptRequest(view, request);
+        if (gameAssetResponse != null) {
+            return addIsolationHeaders(request, gameAssetResponse);
+        }
+        return addIsolationHeaders(request, super.shouldInterceptRequest(view, request));
     }
 
     // AETHERPLAY_ANDROID_SAF_STREAM_V1: shared by WebViewClient and ServiceWorkerClient.
@@ -109,6 +111,58 @@ public class GameWebViewClient extends BridgeWebViewClient {
             android.util.Log.e("AetherPlaySAF", "Could not stream Android game asset", error);
             return errorResponse(500, "Internal Server Error", "Could not open game asset");
         }
+    }
+
+    // AETHERPLAY_COI_RESPONSE_HEADERS_V1
+    // Inject isolation headers only into the local game runtime.
+    static WebResourceResponse addIsolationHeaders(
+        WebResourceRequest request,
+        WebResourceResponse response
+    ) {
+        if (request == null || response == null || request.getUrl() == null) {
+            return response;
+        }
+
+        Uri uri = request.getUrl();
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        String path = uri.getEncodedPath();
+
+        if (!"https".equalsIgnoreCase(scheme)
+                || !"localhost".equalsIgnoreCase(host)
+                || path == null) {
+            return response;
+        }
+
+        boolean isPlay = path.startsWith("/play/");
+        boolean isGameAsset = path.startsWith(GAME_ASSET_PREFIX);
+
+        if (!isPlay && !isGameAsset) {
+            return response;
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        Map<String, String> originalHeaders = response.getResponseHeaders();
+
+        if (originalHeaders != null) {
+            headers.putAll(originalHeaders);
+        }
+
+        if (isPlay) {
+            headers.put("Cross-Origin-Opener-Policy", "same-origin");
+            headers.put("Cross-Origin-Embedder-Policy", "require-corp");
+        }
+
+        headers.put("Cross-Origin-Resource-Policy", "same-origin");
+
+        return new WebResourceResponse(
+            response.getMimeType(),
+            response.getEncoding(),
+            response.getStatusCode(),
+            response.getReasonPhrase(),
+            headers,
+            response.getData()
+        );
     }
 
     private static String mimeForRegisteredAsset(String path, String declaredMime) {

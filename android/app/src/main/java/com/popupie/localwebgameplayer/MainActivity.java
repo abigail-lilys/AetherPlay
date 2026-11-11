@@ -34,10 +34,17 @@ public class MainActivity extends BridgeActivity {
                             GameWebViewClient.interceptAndroidGameAsset(
                                 appContext, request
                             );
-                        if (response != null) return response;
+                        if (response != null) {
+                            return GameWebViewClient.addIsolationHeaders(
+                                request, response
+                            );
+                        }
 
-                        return capacitorBridge.getLocalServer()
-                            .shouldInterceptRequest(request);
+                        return GameWebViewClient.addIsolationHeaders(
+                            request,
+                            capacitorBridge.getLocalServer()
+                                .shouldInterceptRequest(request)
+                        );
                     }
                 }
             );
