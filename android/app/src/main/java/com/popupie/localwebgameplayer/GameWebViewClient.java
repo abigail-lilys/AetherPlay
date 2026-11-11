@@ -113,8 +113,9 @@ public class GameWebViewClient extends BridgeWebViewClient {
         }
     }
 
-    // AETHERPLAY_COI_RESPONSE_HEADERS_V1
-    // Inject isolation headers only into the local game runtime.
+    // AETHERPLAY_COI_RESPONSE_HEADERS_V2
+    // Top-level document establishes COOP/COEP.
+    // Game iframe receives COEP; COOP belongs to the top-level document.
     static WebResourceResponse addIsolationHeaders(
         WebResourceRequest request,
         WebResourceResponse response
@@ -124,36 +125,49 @@ public class GameWebViewClient extends BridgeWebViewClient {
         }
 
         Uri uri = request.getUrl();
-        String scheme = uri.getScheme();
-        String host = uri.getHost();
         String path = uri.getEncodedPath();
 
-        if (!"https".equalsIgnoreCase(scheme)
-                || !"localhost".equalsIgnoreCase(host)
+        if (!"https".equalsIgnoreCase(uri.getScheme())
+                || !"localhost".equalsIgnoreCase(uri.getHost())
                 || path == null) {
             return response;
         }
 
-        boolean isPlay = path.startsWith("/play/");
-        boolean isGameAsset = path.startsWith(GAME_ASSET_PREFIX);
+        boolean topDocument =
+            request.isForMainFrame()
+            && "GET".equalsIgnoreCase(request.getMethod())
+            && (path.isEmpty() || "/".equals(path)
+                || "/index.html".equals(path));
 
-        if (!isPlay && !isGameAsset) {
+        boolean gameDocument = path.startsWith("/play/");
+        boolean gameAsset = path.startsWith(GAME_ASSET_PREFIX);
+
+        if (!topDocument && !gameDocument && !gameAsset) {
             return response;
         }
 
         Map<String, String> headers = new HashMap<>();
-        Map<String, String> originalHeaders = response.getResponseHeaders();
+        Map<String, String> source = response.getResponseHeaders();
 
-        if (originalHeaders != null) {
-            headers.putAll(originalHeaders);
+        if (source != null) {
+            headers.putAll(source);
         }
 
-        if (isPlay) {
+        if (topDocument) {
             headers.put("Cross-Origin-Opener-Policy", "same-origin");
+            headers.put("Cross-Origin-Embedder-Policy", "require-corp");
+            headers.put("Permissions-Policy",
+                "cross-origin-isolated=(self)");
+        } else if (gameDocument) {
             headers.put("Cross-Origin-Embedder-Policy", "require-corp");
         }
 
         headers.put("Cross-Origin-Resource-Policy", "same-origin");
+
+        if (topDocument) {
+            android.util.Log.i("AetherPlayCOI",
+                "top-level COOP/COEP injected: " + path);
+        }
 
         return new WebResourceResponse(
             response.getMimeType(),

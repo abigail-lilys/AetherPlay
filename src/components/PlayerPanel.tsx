@@ -370,7 +370,7 @@ export function PlayerPanel({
                   ref={frameRef}
                   title={activeGame.title}
                   src={playUrl(activeGame)}
-                  allow="fullscreen; autoplay"
+                  allow="fullscreen; autoplay; cross-origin-isolated"
                   tabIndex={-1}
                   onLoad={onIframeLoad}
                 />
